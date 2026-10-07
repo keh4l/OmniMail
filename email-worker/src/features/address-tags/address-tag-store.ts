@@ -26,7 +26,7 @@ export interface AddressTagSummary {
 }
 
 export class AddressTagError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly details?: Record<string, unknown>) {
     super(message)
     this.name = 'AddressTagError'
   }
@@ -103,7 +103,7 @@ export class AddressTagStore {
       this.env.DB.prepare(
         'SELECT address, tag FROM address_tags WHERE user_id = ? ORDER BY address, created_at, rowid',
       ).bind(this.userId),
-      ...SOURCE_QUERIES.map(([, sql]) => this.env.DB.prepare(sql).bind(this.userId)),
+      ...this.sourceStatements(),
     ]))
     const entries = new Map<string, { sources: Set<AddressTagSource>; isActive?: boolean; tags: string[] }>()
     const entry = (raw: string) => {
@@ -143,18 +143,18 @@ export class AddressTagStore {
   }
 
   async replace(address: string, requested: string[]): Promise<string[]> {
-    const [distinct, counts] = await this.run(() => this.env.DB.batch([
+    const [distinct, counts, current] = await this.run(() => this.env.DB.batch([
       this.distinctTagsStatement(),
-      this.env.DB.prepare(
-        `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN address = ? THEN 1 ELSE 0 END), 0) AS current
-           FROM address_tags WHERE user_id = ?`,
-      ).bind(address, this.userId),
+      this.env.DB.prepare('SELECT COUNT(*) AS total FROM address_tags WHERE user_id = ?').bind(this.userId),
+      this.env.DB.prepare('SELECT tag FROM address_tags WHERE user_id = ? AND address = ?').bind(this.userId, address),
     ]))
     const existing = this.tagNames(distinct.results as Array<{ tag: string }>)
     const tags = requested.map((tag) => existing.get(tagKey(tag)) ?? tag)
     this.assertDistinctLimit(existing, tags)
-    const { total, current } = (counts.results?.[0] ?? { total: 0, current: 0 }) as { total: number; current: number }
-    if (Number(total) - Number(current) + tags.length > TAG_ROWS_PER_USER) {
+    const currentKeys = new Set(((current.results ?? []) as Array<{ tag: string }>).map(({ tag }) => tagKey(tag)))
+    if (tags.some((tag) => !currentKeys.has(tagKey(tag)))) await this.assertOwnedAddresses([address])
+    const total = Number((counts.results?.[0] as { total?: number } | undefined)?.total ?? 0)
+    if (total - currentKeys.size + tags.length > TAG_ROWS_PER_USER) {
       throw new AddressTagError(409, '标签记录总数已达到上限。')
     }
     const list = JSON.stringify(tags)
@@ -204,6 +204,7 @@ export class AddressTagStore {
     }
     const total = Number((counts.results?.[0] as { total?: number } | undefined)?.total ?? 0)
     if (total + delta > TAG_ROWS_PER_USER) throw new AddressTagError(409, '标签记录总数已达到上限。')
+    if (added.length) await this.assertOwnedAddresses(addresses)
     const statements: D1PreparedStatement[] = []
     if (remove.length) {
       statements.push(this.env.DB.prepare(
@@ -262,6 +263,29 @@ export class AddressTagStore {
       'DELETE FROM address_tags WHERE user_id = ? AND tag = ?',
     ).bind(this.userId, tag).run())
     if (!result.meta.changes) throw new AddressTagError(404, '标签不存在。')
+  }
+
+  /**
+   * 只能给自己邮箱里的地址添加标签；移除不受限制，账号删除后留下的标签仍可清理。
+   * iCloud 隐藏邮箱只存在 Apple 一侧，服务端无法核对，配置了 iCloud 账号时放行 @icloud.com 地址。
+   */
+  private async assertOwnedAddresses(addresses: string[]): Promise<void> {
+    const results = await this.run(() => this.env.DB.batch([
+      ...this.sourceStatements(),
+      this.env.DB.prepare('SELECT 1 FROM icloud_accounts WHERE user_id = ? LIMIT 1').bind(this.userId),
+    ]))
+    const hasICloud = Boolean(results[results.length - 1]?.results?.length)
+    const owned = new Set(results.slice(0, -1).flatMap((result) => (
+      ((result.results ?? []) as SourceRow[]).filter((row) => row.address).map((row) => normalizeEmail(row.address))
+    )))
+    const unknown = addresses.filter((address) => !owned.has(address) && !(hasICloud && address.endsWith('@icloud.com')))
+    if (unknown.length) {
+      throw new AddressTagError(400, '只能给你邮箱里的地址添加标签。', { unknownAddresses: unknown })
+    }
+  }
+
+  private sourceStatements(): D1PreparedStatement[] {
+    return SOURCE_QUERIES.map(([, sql]) => this.env.DB.prepare(sql).bind(this.userId))
   }
 
   private distinctTagsStatement(): D1PreparedStatement {

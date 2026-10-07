@@ -715,6 +715,7 @@ curl --request GET \
 - 权限：登录用户（Session Cookie 或 Bearer Access Token）
 - 请求：Path · address; JSON · tags[]
 - 响应：200 · { address, tags }
+- 注意：只能给自己邮箱里的地址（自有域名地址和已接入的外部邮箱）添加标签，否则返回 400 和 unknownAddresses；配置了 iCloud 账号时 @icloud.com 地址也可以。移除标签不受此限制。
 - 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
 
 ```bash
@@ -738,6 +739,7 @@ curl --request PUT \
 - 权限：登录用户（Session Cookie 或 Bearer Access Token）
 - 请求：JSON · addresses[], add?[], remove?[]
 - 响应：200 · { addresses }
+- 注意：只能给自己邮箱里的地址（自有域名地址和已接入的外部邮箱）添加标签，否则返回 400 和 unknownAddresses；配置了 iCloud 账号时 @icloud.com 地址也可以。移除标签不受此限制。
 - 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
 
 ```bash

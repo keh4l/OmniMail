@@ -1,4 +1,4 @@
-import { Inbox, Plus, RefreshCw, SearchX, Settings2, Tags } from 'lucide-react'
+import { Inbox, RefreshCw, SearchX, Settings2, Tags } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../../../shared/api'
 import { t } from '../../../shared/i18n'
@@ -9,6 +9,7 @@ import {
   emptyAddressTagFilters,
   filterAddressEntries,
   groupEntriesBySource,
+  isStaleEntry,
   mergeHideMyEmailAliases,
   tagKey,
   tagSummaries,
@@ -17,6 +18,7 @@ import {
   type TagFilterState,
 } from '../model/addressTagFilter'
 import { AddressGroupList } from './AddressGroupList'
+import { TAGS_PER_ADDRESS } from './AddressRowTags'
 import { SelectionBar } from './SelectionBar'
 import { TagFilterBar } from './TagFilterBar'
 import { TagManagerPopover } from './TagManagerPopover'
@@ -29,11 +31,6 @@ type AliasState = 'idle' | 'loading' | 'ready' | 'partial'
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback
-}
-
-function manualAddress(query: string): string {
-  const address = query.trim().toLowerCase()
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) && address.length <= 254 ? address : ''
 }
 
 function isTyping(target: EventTarget | null): boolean {
@@ -121,8 +118,7 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
   const groups = useMemo(() => groupEntriesBySource(visible), [visible])
   const chosen = useMemo(() => visible.filter((entry) => selected.has(entry.address)), [visible, selected])
   const removable = useMemo(() => tagSummaries(chosen), [chosen])
-  const candidate = manualAddress(filters.query)
-  const canAddCandidate = Boolean(candidate) && !all.some((entry) => entry.address === candidate)
+  const canClearStale = !iCloudEnabled || aliasState === 'ready'
 
   function applyUpdates(updates: AddressTagUpdate[]) {
     setEntries((current) => applyAddressTagUpdates(current, updates))
@@ -140,8 +136,13 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
   }, [])
 
   async function applyBulk(bulkMode: 'add' | 'remove', tag: string) {
-    const addresses = chosen.map((entry) => entry.address)
-    if (!addresses.length) return
+    // 已不在邮箱里的地址只能移除标签，添加时跳过。
+    const addresses = chosen.filter((entry) => bulkMode === 'remove' || !isStaleEntry(entry)).map((entry) => entry.address)
+    const skipped = chosen.length - addresses.length
+    if (!addresses.length) {
+      if (skipped) setError(t('所选地址都已不在邮箱里，不能添加标签。'))
+      return
+    }
     setBusy(true)
     setError('')
     try {
@@ -149,11 +150,37 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
         const change = bulkMode === 'add' ? { add: [tag] } : { remove: [tag] }
         applyUpdates((await addressTagApi.batch(addresses.slice(index, index + BATCH_SIZE), change)).addresses)
       }
-      setNotice(bulkMode === 'add'
-        ? t('已给 {count} 个地址加上“{tag}”', { count: addresses.length, tag })
-        : t('已从 {count} 个地址移除“{tag}”', { count: addresses.length, tag }))
+      setNotice(bulkMode === 'remove'
+        ? t('已从 {count} 个地址移除“{tag}”', { count: addresses.length, tag })
+        : skipped
+          ? t('已给 {count} 个地址加上“{tag}”，跳过 {skipped} 个已不在邮箱里的地址', { count: addresses.length, tag, skipped })
+          : t('已给 {count} 个地址加上“{tag}”', { count: addresses.length, tag }))
     } catch (bulkError) {
       setError(errorText(bulkError, t('无法批量更新标签。')))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function clearStale(stale: AddressTagEntry[]) {
+    setBusy(true)
+    setError('')
+    try {
+      for (let index = 0; index < stale.length; index += BATCH_SIZE) {
+        const chunk = stale.slice(index, index + BATCH_SIZE)
+        const names = tagSummaries(chunk).map((summary) => summary.name)
+        // 单次请求最多移除 20 个标签。
+        for (let start = 0; start < names.length; start += TAGS_PER_ADDRESS) {
+          const remove = names.slice(start, start + TAGS_PER_ADDRESS)
+          applyUpdates((await addressTagApi.batch(chunk.map((entry) => entry.address), { remove })).addresses)
+        }
+      }
+      setSelected((current) => new Set([...current].filter((address) => !stale.some((entry) => entry.address === address))))
+      setNotice(t('已清理 {count} 个地址的标签', { count: stale.length }))
+      return true
+    } catch (clearError) {
+      setError(errorText(clearError, t('无法清理标签。')))
+      return false
     } finally {
       setBusy(false)
     }
@@ -285,20 +312,14 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
             onSelect={select}
             onSelectGroup={selectGroup}
             onSave={saveTags}
+            canClearStale={canClearStale}
+            onClearStale={clearStale}
           />
         ) : (
           <div className="tag-empty">
             {all.length ? <SearchX size={28} aria-hidden="true" /> : <Inbox size={28} aria-hidden="true" />}
             <strong>{all.length ? t('没有符合条件的地址') : t('还没有可以打标签的地址')}</strong>
             <span>{all.length ? t('换个条件试试，或清除筛选。') : t('先创建邮箱地址或接入外部邮箱。')}</span>
-            {canAddCandidate && (
-              <button className="button button--small button--secondary" type="button" onClick={() => {
-                applyUpdates([{ address: candidate, tags: [] }])
-                setFilters({ ...emptyAddressTagFilters, query: candidate })
-              }}>
-                <Plus size={14} />{t('把 {address} 加入列表', { address: candidate })}
-              </button>
-            )}
           </div>
         )}
       </section>

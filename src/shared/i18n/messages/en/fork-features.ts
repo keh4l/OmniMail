@@ -27,7 +27,7 @@ export const enForkFeatures: Record<string, string> = {
   '还没有标签。在地址行末点“+”给地址打上网站名，之后就能在这里筛选。':
     'No tags yet. Click “+” at the end of an address row to tag it with a site name, then filter here.',
   '自有域名': 'Own domains',
-  '其他地址': 'Other',
+  '已不在邮箱里': 'No longer in your mailboxes',
   '已打标签 {tagged} / {total}': 'Tagged {tagged} / {total}',
   '选择{source}的全部地址': 'Select all addresses in {source}',
   '选择 {address}': 'Select {address}',
@@ -47,7 +47,16 @@ export const enForkFeatures: Record<string, string> = {
   '换个条件试试，或清除筛选。': 'Try other conditions or clear the filters.',
   '还没有可以打标签的地址': 'No addresses to tag yet',
   '先创建邮箱地址或接入外部邮箱。': 'Create a mailbox address or connect an external mailbox first.',
-  '把 {address} 加入列表': 'Add {address} to the list',
+  '这些地址已不在你的邮箱里（例如账号已删除），只能移除标签。重新添加这个邮箱后，标签会自动恢复。':
+    'These addresses are no longer in your mailboxes (for example, the account was removed), so you can only remove their tags. Add the mailbox again and its tags come back.',
+  '清理': 'Clean up',
+  '清除 {count} 个地址的标签': 'Clear tags from {count} addresses',
+  '已清理 {count} 个地址的标签': 'Cleared tags from {count} addresses',
+  '无法清理标签。': 'Could not clean up tags.',
+  '所选地址都已不在邮箱里，不能添加标签。': 'None of the selected addresses are in your mailboxes, so no tags were added.',
+  '已给 {count} 个地址加上“{tag}”，跳过 {skipped} 个已不在邮箱里的地址':
+    'Added “{tag}” to {count} addresses and skipped {skipped} that are no longer in your mailboxes',
+  '只能给你邮箱里的地址添加标签。': 'You can only tag addresses that are in your mailboxes.',
   '无法读取地址标签。': 'Could not load address tags.',
   '无法保存标签。': 'Could not save tags.',
   '无法批量更新标签。': 'Could not update tags in bulk.',

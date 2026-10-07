@@ -42,7 +42,8 @@ describe('address tags page', () => {
     const html = renderToStaticMarkup(
       <AddressGroupList groups={groupEntriesBySource(entries)} collapsed={new Set(['microsoft'])}
         selected={new Set(['shop@mine.test'])} suggestions={tags} onToggleGroup={() => undefined}
-        onSelect={() => undefined} onSelectGroup={() => undefined} onSave={async () => []} />,
+        onSelect={() => undefined} onSelectGroup={() => undefined} onSave={async () => []}
+        canClearStale onClearStale={async () => true} />,
     )
     expect(html).toContain('自有域名')
     expect(html).toContain('Microsoft')
@@ -53,6 +54,24 @@ describe('address tags page', () => {
     expect(html).toContain('aria-label="为 a1@outlook.com 添加标签"')
     expect(html).toMatch(/data-collapsed="true"/)
     expect(html).toContain('data-selecting="true"')
+    expect(html).not.toContain('tag-stale')
+  })
+
+  it('lets stale addresses only lose tags and offers a cleanup once iCloud aliases are known', () => {
+    const stale: AddressTagEntry[] = [{ address: 'gone@outlook.com', sources: ['other'], tags: ['GPT'] }]
+    const render = (canClearStale: boolean) => renderToStaticMarkup(
+      <AddressGroupList groups={groupEntriesBySource(stale)} collapsed={new Set()} selected={new Set()}
+        suggestions={tags} onToggleGroup={() => undefined} onSelect={() => undefined}
+        onSelectGroup={() => undefined} onSave={async () => []}
+        canClearStale={canClearStale} onClearStale={async () => true} />,
+    )
+    const html = render(true)
+    expect(html).toContain('已不在邮箱里')
+    expect(html).toContain('只能移除标签')
+    expect(html).toContain('aria-label="移除标签 GPT"')
+    expect(html).not.toContain('为 gone@outlook.com 添加标签')
+    expect(html).toContain('清理')
+    expect(render(false)).not.toContain('tag-stale__clear')
   })
 })
 

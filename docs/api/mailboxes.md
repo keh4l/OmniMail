@@ -160,7 +160,7 @@ curl --request GET \
   --header "Authorization: Bearer om_at_..."
 ```
 
-<!-- endpoint:PUT /api/address-tags/:address catalog:4a4b9f634ae0 -->
+<!-- endpoint:PUT /api/address-tags/:address catalog:9fcbc05808b3 -->
 ## `PUT /api/address-tags/{address}`
 
 **设置地址的标签 / Set the tags of an address**
@@ -174,6 +174,10 @@ curl --request GET \
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
 | 请求 | Path · address; JSON · tags[] |
 | 成功响应 | 200 · { address, tags } |
+
+> 注意：只能给自己邮箱里的地址（自有域名地址和已接入的外部邮箱）添加标签，否则返回 400 和 unknownAddresses；配置了 iCloud 账号时 @icloud.com 地址也可以。移除标签不受此限制。
+>
+> Note: Tags can only be added to addresses in your mailboxes (own-domain and connected external addresses); otherwise the API returns 400 with unknownAddresses. With an iCloud account configured, @icloud.com addresses are accepted too. Removing tags is always allowed.
 
 > 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
 >
@@ -193,7 +197,7 @@ curl --request PUT \
 }'
 ```
 
-<!-- endpoint:POST /api/address-tags/batch catalog:9cea3dd4de9e -->
+<!-- endpoint:POST /api/address-tags/batch catalog:befc5173ab67 -->
 ## `POST /api/address-tags/batch`
 
 **批量添加或移除标签 / Add or remove tags in bulk**
@@ -207,6 +211,10 @@ curl --request PUT \
 | 认证 | 登录用户；支持 Session Cookie 或 Access Token |
 | 请求 | JSON · addresses[], add?[], remove?[] |
 | 成功响应 | 200 · { addresses } |
+
+> 注意：只能给自己邮箱里的地址（自有域名地址和已接入的外部邮箱）添加标签，否则返回 400 和 unknownAddresses；配置了 iCloud 账号时 @icloud.com 地址也可以。移除标签不受此限制。
+>
+> Note: Tags can only be added to addresses in your mailboxes (own-domain and connected external addresses); otherwise the API returns 400 with unknownAddresses. With an iCloud account configured, @icloud.com addresses are accepted too. Removing tags is always allowed.
 
 > 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
 >

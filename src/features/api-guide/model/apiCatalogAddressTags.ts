@@ -1,5 +1,10 @@
 import { localized as l, type ApiEndpoint } from './apiCatalogTypes'
 
+const ownedNote = l(
+  '只能给自己邮箱里的地址（自有域名地址和已接入的外部邮箱）添加标签，否则返回 400 和 unknownAddresses；配置了 iCloud 账号时 @icloud.com 地址也可以。移除标签不受此限制。',
+  'Tags can only be added to addresses in your mailboxes (own-domain and connected external addresses); otherwise the API returns 400 with unknownAddresses. With an iCloud account configured, @icloud.com addresses are accepted too. Removing tags is always allowed.',
+)
+
 const privateNote = l(
   '标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。',
   'Tags are private to the current user; scoped device tokens such as the extension and Android cannot access them.',
@@ -25,7 +30,7 @@ export const addressTagEndpoints: ApiEndpoint[] = [
     ),
     request: 'Path · address; JSON · tags[]', response: '200 · { address, tags }',
     exampleBody: { tags: ['example.com'] },
-    notes: [privateNote],
+    notes: [ownedNote, privateNote],
   },
   {
     method: 'POST', path: '/api/address-tags/batch', group: 'mailboxes', auth: 'authenticated',
@@ -36,7 +41,7 @@ export const addressTagEndpoints: ApiEndpoint[] = [
     ),
     request: 'JSON · addresses[], add?[], remove?[]', response: '200 · { addresses }',
     exampleBody: { addresses: ['owner@example.com'], add: ['example.com'] },
-    notes: [privateNote],
+    notes: [ownedNote, privateNote],
   },
   {
     method: 'PATCH', path: '/api/address-tags/tags/:tag', group: 'mailboxes', auth: 'authenticated',

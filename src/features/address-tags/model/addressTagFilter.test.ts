@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AddressTagEntry } from '../api/address-tag-api-client'
 import {
   applyAddressTagUpdates,
+  isStaleEntry,
   emptyAddressTagFilters,
   filterAddressEntries,
   hasActiveFilters,
@@ -83,15 +84,17 @@ describe('address tag helpers', () => {
 
   it('applies server updates and recomputes tag counts', () => {
     const updated = applyAddressTagUpdates(entries, [
-      { address: 'c@gmail.com', tags: ['网站A'] },
-      { address: 'manual@else.test', tags: ['网站C'] },
+      { address: 'c@gmail.com', tags: ['网站A', '网站C'] },
+      { address: 'unknown@else.test', tags: ['网站D'] },
     ])
-    expect(updated.find((entry) => entry.address === 'manual@else.test')?.sources).toEqual(['other'])
+    expect(addresses(updated)).toEqual(addresses(entries))
     expect(tagSummaries(updated)).toEqual([
       { name: 'GitHub', count: 2 },
       { name: '网站A', count: 2 },
       { name: '网站B', count: 1 },
       { name: '网站C', count: 1 },
     ])
+    expect(isStaleEntry(entries[3])).toBe(true)
+    expect(addresses(applyAddressTagUpdates(entries, [{ address: 'old@site.test', tags: [] }]))).not.toContain('old@site.test')
   })
 })

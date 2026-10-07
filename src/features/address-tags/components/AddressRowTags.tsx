@@ -16,11 +16,13 @@ export function AddressRowTags({
   address,
   tags: savedTags,
   suggestions,
+  canAdd = true,
   onSave,
 }: {
   address: string
   tags: string[]
   suggestions: AddressTagSummary[]
+  canAdd?: boolean
   onSave: (address: string, tags: string[]) => Promise<string[] | null>
 }) {
   const [tags, setTags] = useState(savedTags)
@@ -139,7 +141,7 @@ export function AddressRowTags({
               if (last) removeButtons.current.get(tagKey(last))?.focus()
             }}
           />
-        ) : !full && (
+        ) : canAdd && !full && (
           <button
             type="button"
             className={`tag-add${tags.length ? ' is-compact' : ''}`}

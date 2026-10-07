@@ -32,7 +32,8 @@ beforeAll(async () => {
      VALUES ('tag-user', 'tags@example.com', 'Tags', 'test', 'user', 1)`,
   ).run()
   await env.DB.prepare(
-    "INSERT INTO mailboxes (address, user_id, is_primary) VALUES ('signup@mail.example.com', 'tag-user', 1)",
+    `INSERT INTO mailboxes (address, user_id, is_primary) VALUES
+       ('signup@mail.example.com', 'tag-user', 1), ('second@mail.example.com', 'tag-user', 0)`,
   ).run()
   await deviceSession('full-device', fullToken, '*')
   await deviceSession('OmniMail Float', extensionToken, EXTENSION_DEVICE_SCOPES)
@@ -48,12 +49,20 @@ describe('address tag routes on D1', () => {
 
     const batch = await call('/api/address-tags/batch', {
       method: 'POST',
-      body: JSON.stringify({ addresses: ['signup@mail.example.com', 'alias@icloud.com'], add: ['github'], remove: ['网站A'] }),
+      body: JSON.stringify({ addresses: ['signup@mail.example.com', 'second@mail.example.com'], add: ['github'], remove: ['网站A'] }),
     })
     await expect(batch.json()).resolves.toEqual({ addresses: [
       { address: 'signup@mail.example.com', tags: ['GitHub'] },
-      { address: 'alias@icloud.com', tags: ['GitHub'] },
+      { address: 'second@mail.example.com', tags: ['GitHub'] },
     ] })
+
+    const stranger = await call('/api/address-tags/batch', {
+      method: 'POST', body: JSON.stringify({ addresses: ['second@mail.example.com', 'stranger@else.test'], add: ['网站B'] }),
+    })
+    expect(stranger.status).toBe(400)
+    await expect(stranger.json()).resolves.toEqual({
+      error: '只能给你邮箱里的地址添加标签。', unknownAddresses: ['stranger@else.test'],
+    })
 
     const renamed = await call(`/api/address-tags/tags/${encodeURIComponent('GitHub')}`, {
       method: 'PATCH', body: JSON.stringify({ name: '代码托管' }),
@@ -64,7 +73,7 @@ describe('address tag routes on D1', () => {
     expect(listed.headers.get('Cache-Control')).toBe('private, no-store')
     await expect(listed.json()).resolves.toEqual({
       addresses: [
-        { address: 'alias@icloud.com', sources: ['other'], tags: ['代码托管'] },
+        { address: 'second@mail.example.com', sources: ['omnimail'], isActive: true, tags: ['代码托管'] },
         { address: 'signup@mail.example.com', sources: ['omnimail'], isActive: true, tags: ['代码托管'] },
       ],
       tags: [{ name: '代码托管', count: 2 }],

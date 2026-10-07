@@ -87,15 +87,19 @@ export function mergeHideMyEmailAliases(entries: AddressTagEntry[], aliases: str
   return [...merged.values()].sort((left, right) => left.address.localeCompare(right.address))
 }
 
+/** 带有标签、但已不在任何邮箱来源里的地址（例如账号已删除）：只能移除标签，不能再添加。 */
+export function isStaleEntry(entry: AddressTagEntry): boolean {
+  return entry.sources.includes('other')
+}
+
 export function applyAddressTagUpdates(entries: AddressTagEntry[], updates: AddressTagUpdate[]): AddressTagEntry[] {
   const changes = new Map(updates.map((update) => [update.address, update.tags]))
-  const next = entries.map((entry) => (changes.has(entry.address) ? { ...entry, tags: changes.get(entry.address) ?? [] } : entry))
-  for (const update of updates) {
-    if (!entries.some((entry) => entry.address === update.address)) {
-      next.push({ address: update.address, sources: ['other'], tags: update.tags })
-    }
-  }
-  return next.sort((left, right) => left.address.localeCompare(right.address))
+  return entries.flatMap((entry) => {
+    if (!changes.has(entry.address)) return [entry]
+    const tags = changes.get(entry.address) ?? []
+    // 已不在邮箱里的地址清空标签后，服务端也不会再返回它，直接从列表移除。
+    return isStaleEntry(entry) && !tags.length ? [] : [{ ...entry, tags }]
+  })
 }
 
 export function tagSummaries(entries: AddressTagEntry[]): AddressTagSummary[] {

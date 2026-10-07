@@ -6,7 +6,9 @@ import {
   filterAddressEntries,
   hasActiveFilters,
   mergeHideMyEmailAliases,
-  nextTagFilterState,
+  groupEntriesBySource,
+  toggleTagFilter,
+  withoutTagFilter,
   normalizeTagInput,
   sourceCounts,
   tagSummaries,
@@ -46,10 +48,18 @@ describe('address tag filters', () => {
     expect(hasActiveFilters({ ...emptyAddressTagFilters, untaggedOnly: true })).toBe(true)
   })
 
-  it('cycles a tag through include, exclude and neutral', () => {
-    expect(nextTagFilterState()).toBe('include')
-    expect(nextTagFilterState('include')).toBe('exclude')
-    expect(nextTagFilterState('exclude')).toBeUndefined()
+  it('toggles a tag according to the current include or exclude mode', () => {
+    const included = toggleTagFilter(emptyAddressTagFilters, '网站A', 'include')
+    expect(included.tags).toEqual({ 网站a: 'include' })
+    expect(toggleTagFilter(included, '网站A', 'exclude').tags).toEqual({ 网站a: 'exclude' })
+    expect(toggleTagFilter(included, '网站a', 'include').tags).toEqual({})
+    expect(withoutTagFilter(included, '网站A').tags).toEqual({})
+  })
+
+  it('groups addresses by their primary source in a stable order', () => {
+    expect(groupEntriesBySource(entries).map((group) => [group.source, group.entries.length])).toEqual([
+      ['omnimail', 2], ['gmail', 1], ['other', 1],
+    ])
   })
 })
 

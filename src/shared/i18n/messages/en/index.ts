@@ -20,7 +20,7 @@ import { enQqMail } from './qq-mail'
 import { enSecurity } from './security'
 import { enVersion } from './version'
 import { enTelegram } from './telegram'
-import { enAddressTags } from './address-tags'
+import { enForkFeatures } from './fork-features'
 
 export const englishTranslations: Record<string, string> = {
   ...enMailCredentials,
@@ -37,7 +37,7 @@ export const englishTranslations: Record<string, string> = {
   ...enRateLimit,
   ...enVersion,
   ...enTelegram,
-  ...enAddressTags,
+  ...enForkFeatures,
   ...enICloud,
   ...enLinuxDoMail,
   ...enGmail,

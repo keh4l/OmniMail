@@ -36,9 +36,19 @@ export function withoutTag(tags: string[], tag: string): string[] {
   return tags.filter((current) => tagKey(current) !== tagKey(tag))
 }
 
-export function nextTagFilterState(current?: TagFilterState): TagFilterState | undefined {
-  if (!current) return 'include'
-  return current === 'include' ? 'exclude' : undefined
+// 点击标签：未选中时按当前模式加入；与当前模式相同则取消；不同则切换到当前模式。
+export function toggleTagFilter(filters: AddressTagFilters, tag: string, mode: TagFilterState): AddressTagFilters {
+  const key = tagKey(tag)
+  const rules = { ...filters.tags }
+  if (rules[key] === mode) delete rules[key]
+  else rules[key] = mode
+  return { ...filters, tags: rules }
+}
+
+export function withoutTagFilter(filters: AddressTagFilters, tag: string): AddressTagFilters {
+  const rules = { ...filters.tags }
+  delete rules[tagKey(tag)]
+  return { ...filters, tags: rules }
 }
 
 export function hasActiveFilters(filters: AddressTagFilters): boolean {
@@ -108,6 +118,21 @@ export function sourceCounts(entries: AddressTagEntry[]): Array<[AddressTagSourc
   const counts = new Map<AddressTagSource, number>()
   for (const source of entries.flatMap((entry) => entry.sources)) counts.set(source, (counts.get(source) ?? 0) + 1)
   return SOURCE_ORDER.filter((source) => counts.has(source)).map((source) => [source, counts.get(source) ?? 0])
+}
+
+export interface AddressGroup {
+  source: AddressTagSource
+  entries: AddressTagEntry[]
+}
+
+// 按主来源分组（来源已按固定顺序排列，第一个即主来源），组的顺序与 SOURCE_ORDER 一致。
+export function groupEntriesBySource(entries: AddressTagEntry[]): AddressGroup[] {
+  const groups = new Map<AddressTagSource, AddressTagEntry[]>()
+  for (const entry of entries) {
+    const source = entry.sources[0] ?? 'other'
+    groups.set(source, [...(groups.get(source) ?? []), entry])
+  }
+  return SOURCE_ORDER.filter((source) => groups.has(source)).map((source) => ({ source, entries: groups.get(source) ?? [] }))
 }
 
 function sortSources(sources: AddressTagSource[]): AddressTagSource[] {

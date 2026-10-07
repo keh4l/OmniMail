@@ -1,5 +1,6 @@
 import {
   BookOpen,
+  Bot,
   Braces,
   Clock3,
   ExternalLink,
@@ -63,12 +64,11 @@ export function ApiGuide() {
         title={t('API 使用')}
         description={t('从其他工具安全调用当前 OmniMail 实例。')}
         actions={<div className="user-header-actions">
-          <a
-            className="button button--secondary"
-            href="https://github.com/mibgb65-cloud/OmniMail/blob/main/docs/API.md"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+          {/* 文档由当前实例提供，内容与已部署版本的接口目录保持一致。 */}
+          <a className="button button--secondary" href="/llms.txt" target="_blank" rel="noopener noreferrer">
+            <Bot size={16} aria-hidden="true" />{t('llms.txt（给 AI）')}
+          </a>
+          <a className="button button--secondary" href="/llms-full.txt" target="_blank" rel="noopener noreferrer">
             <ExternalLink size={16} aria-hidden="true" />{t('完整 API 文档')}
           </a>
         </div>}

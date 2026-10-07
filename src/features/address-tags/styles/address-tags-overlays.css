@@ -1,0 +1,517 @@
+/* 地址标签页的浮层与反馈：标签管理、联想浮层、复制翻转、批量操作栏。 */
+.tag-icon-button {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.tag-icon-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.tag-icon-button.is-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tag-icon-button.is-primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.tag-icon-button:disabled,
+.tag-text-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.tag-text-button {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tag-text-button.is-danger {
+  border-color: transparent;
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 标签管理 */
+.tag-manager {
+  width: min(360px, calc(100vw - 16px));
+}
+
+.tag-manager__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 8px 10px 10px;
+}
+
+.tag-manager__header strong {
+  font-size: 14px;
+}
+
+.tag-manager__header small,
+.tag-manager__count {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tag-manager__list {
+  display: grid;
+  max-height: min(50vh, 380px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.tag-manager__list li {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 8px;
+  border-radius: 10px;
+}
+
+.tag-manager__list li:hover {
+  background: var(--surface-hover);
+}
+
+.tag-manager__list li[data-state="delete"] {
+  background: var(--danger-soft);
+}
+
+.tag-manager__count {
+  margin-left: auto;
+  margin-right: 4px;
+}
+
+.tag-manager__rename,
+.tag-manager__confirm {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-manager__rename input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  outline: 0;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.tag-manager__confirm > span {
+  min-width: 0;
+  flex: 1;
+  color: var(--danger);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.tag-manager__empty,
+.tag-manager__hint {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.tag-manager__hint {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+/* 联想浮层：从输入框左上角长出，当前项的底色在选项间滑动 */
+.tag-suggest {
+  position: relative;
+  display: inline-flex;
+}
+
+.tag-suggest__input {
+  width: 190px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  outline: 0;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  transition: box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.tag-suggest__input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tag-row__input .tag-suggest__input {
+  animation: tag-input-grow 260ms var(--tag-ease);
+}
+
+.tag-suggest__popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  clip-path: inset(0 calc(100% - 28px) calc(100% - 28px) 0 round 12px);
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.92);
+  transform-origin: top left;
+  transition: clip-path 170ms ease, opacity 170ms ease, transform 170ms ease, visibility 0s linear 170ms;
+}
+
+.tag-suggest__popover[data-side="top"] {
+  top: auto;
+  bottom: calc(100% + 6px);
+  clip-path: inset(calc(100% - 28px) calc(100% - 28px) 0 0 round 12px);
+  transform-origin: bottom left;
+}
+
+.tag-suggest__popover[data-open="true"] {
+  clip-path: inset(0 0 0 0 round 12px);
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition: clip-path 280ms var(--tag-ease), opacity 200ms ease, transform 280ms var(--tag-ease), visibility 0s;
+}
+
+.tag-suggest__highlight {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  left: 5px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--surface-hover);
+  transform: translateY(calc(var(--tag-suggest-index, 0) * 32px));
+  transition: transform 200ms var(--tag-ease);
+}
+
+.tag-suggest__list {
+  position: relative;
+  display: grid;
+}
+
+.tag-suggest__option {
+  position: relative;
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tag-suggest__option svg {
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+.tag-suggest__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag-suggest__option small {
+  margin-left: auto;
+  padding-left: 12px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 复制：绕竖轴翻成对勾，上方冒出气泡 */
+.tag-copy {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.tag-copy__button {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  perspective: 200px;
+  transition: opacity 150ms ease, background-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.tag-row:hover .tag-copy__button,
+.tag-copy__button:focus-visible,
+.tag-copy:not([data-state="idle"]) .tag-copy__button {
+  opacity: 1;
+}
+
+.tag-copy__button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.tag-copy__button:active {
+  transform: scale(0.92);
+}
+
+.tag-copy__face {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  backface-visibility: hidden;
+  transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tag-copy__face--back {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  transform: rotateY(180deg);
+}
+
+.tag-copy[data-state="copied"] .tag-copy__face {
+  transform: rotateY(-180deg);
+}
+
+.tag-copy[data-state="copied"] .tag-copy__face--back {
+  transform: rotateY(0deg);
+}
+
+.tag-copy__bubble {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px) scale(0.88);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.tag-copy__bubble::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  border: 5px solid transparent;
+  border-top-color: var(--text);
+  transform: translateX(-50%);
+}
+
+.tag-copy[data-state="copied"] .tag-copy__bubble,
+.tag-copy[data-state="failed"] .tag-copy__bubble {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  transition: opacity 220ms ease, transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.tag-copy[data-state="failed"] .tag-copy__bubble {
+  background: var(--danger);
+  color: #fff;
+}
+
+.tag-copy[data-state="failed"] .tag-copy__bubble::after {
+  border-top-color: var(--danger);
+}
+
+/* 批量操作栏：从底部升起，带一点回弹 */
+.tag-selection {
+  position: sticky;
+  bottom: 20px;
+  z-index: 40;
+  display: flex;
+  height: 0;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.tag-selection__panel {
+  position: absolute;
+  bottom: 0;
+  display: flex;
+  max-width: calc(100% - 24px);
+  align-items: center;
+  gap: 10px;
+  padding: 7px 7px 7px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  pointer-events: auto;
+  transform: translateY(calc(100% + 40px));
+  transition: transform 220ms cubic-bezier(0.4, 0, 1, 1), opacity 200ms ease;
+}
+
+.tag-selection[data-open="true"] .tag-selection__panel {
+  opacity: 1;
+  transform: none;
+  transition: transform 460ms var(--tag-spring), opacity 180ms ease;
+}
+
+.tag-selection__count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.tag-selection__count strong {
+  display: inline-block;
+  color: var(--text);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  animation: tag-count-pop 320ms var(--tag-spring);
+}
+
+.tag-selection__input .tag-suggest__input {
+  width: 220px;
+  height: 32px;
+}
+
+.tag-selection__close {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.tag-selection__close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+@keyframes tag-input-grow {
+  from { width: 28px; opacity: 0.4; }
+}
+
+@keyframes tag-count-pop {
+  0% { transform: translateY(0) scale(1); }
+  35% { transform: translateY(-5px) scale(1.18); }
+  65% { transform: translateY(0) scale(0.94); }
+  100% { transform: none; }
+}
+
+@media (hover: none) {
+  .tag-copy__button {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 760px) {
+  .tag-query__top {
+    flex-wrap: wrap;
+  }
+
+  .tag-source-button {
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+
+  .tag-query__tags {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .tag-selection__panel {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 20px;
+    padding: 10px;
+  }
+
+  .tag-selection__input,
+  .tag-selection__input .tag-suggest__input {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tag-popover,
+  .tag-popover [data-stagger],
+  .tag-suggest__popover,
+  .tag-suggest__highlight,
+  .tag-copy__face,
+  .tag-copy__bubble,
+  .tag-selection__panel,
+  .tag-selection__count strong,
+  .tag-row__input .tag-suggest__input,
+  .tag-filter-chip,
+  .tag-filter-chip::before,
+  .tag-filter-chip__icon,
+  .tag-filter-chip__icon path,
+  .tag-filter-chip__icon circle,
+  .tag-mode__thumb,
+  .tag-query__summary {
+    animation: none;
+    transition: none;
+  }
+}

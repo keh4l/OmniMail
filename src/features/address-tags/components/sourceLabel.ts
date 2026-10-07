@@ -12,6 +12,6 @@ export function sourceLabel(source: AddressTagSource): string {
     case 'naver': return 'NAVER'
     case 'yandex': return 'Yandex'
     case 'linuxdo': return 'Linux DO'
-    default: return t('其他地址')
+    default: return t('已不在邮箱里')
   }
 }

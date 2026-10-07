@@ -28,7 +28,7 @@ async function respond(operation: () => Promise<Response>): Promise<Response> {
   try {
     return await operation()
   } catch (error) {
-    if (error instanceof AddressTagError) return privateJson({ error: error.message }, error.status)
+    if (error instanceof AddressTagError) return privateJson({ error: error.message, ...error.details }, error.status)
     throw error
   }
 }

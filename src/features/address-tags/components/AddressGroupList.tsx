@@ -1,8 +1,8 @@
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, Eraser } from 'lucide-react'
 import { useEffect, useId, useRef, useState, type MouseEvent } from 'react'
 import { t } from '../../../shared/i18n'
 import type { AddressTagEntry, AddressTagSource, AddressTagSummary } from '../api/address-tag-api-client'
-import type { AddressGroup } from '../model/addressTagFilter'
+import { isStaleEntry, type AddressGroup } from '../model/addressTagFilter'
 import { prefersReducedMotion } from '../model/motion'
 import { AddressRowTags } from './AddressRowTags'
 import { CopyAddressButton } from './CopyAddressButton'
@@ -13,6 +13,12 @@ interface ListActions {
   suggestions: AddressTagSummary[]
   onSelect: (address: string, checked: boolean, range: boolean) => void
   onSave: (address: string, tags: string[]) => Promise<string[] | null>
+}
+
+interface StaleActions {
+  /** iCloud 隐藏邮箱读取完成前，部分地址会暂时显示为已不在邮箱里，此时不提供清理。 */
+  canClearStale: boolean
+  onClearStale: (entries: AddressTagEntry[]) => Promise<boolean>
 }
 
 function AddressRow({ entry, selected, suggestions, onSelect, onSave }: Omit<ListActions, 'selected'> & {
@@ -39,12 +45,47 @@ function AddressRow({ entry, selected, suggestions, onSelect, onSave }: Omit<Lis
         {entry.sources.slice(1).map((source) => <span className="tag-row__badge" key={source}>{sourceLabel(source)}</span>)}
         {entry.isActive === false && <span className="tag-row__badge is-muted">{t('已停用')}</span>}
       </span>
-      <AddressRowTags address={entry.address} tags={entry.tags} suggestions={suggestions} onSave={onSave} />
+      <AddressRowTags
+        address={entry.address}
+        tags={entry.tags}
+        suggestions={suggestions}
+        canAdd={!isStaleEntry(entry)}
+        onSave={onSave}
+      />
     </li>
   )
 }
 
-function AddressGroupSection({ group, collapsed, onToggle, onSelectGroup, ...actions }: ListActions & {
+function StaleGroupNote({ entries, canClear, onClear }: {
+  entries: AddressTagEntry[]
+  canClear: boolean
+  onClear: StaleActions['onClearStale']
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="tag-stale">
+      <p>{t('这些地址已不在你的邮箱里（例如账号已删除），只能移除标签。重新添加这个邮箱后，标签会自动恢复。')}</p>
+      {canClear && (confirming ? (
+        <span className="tag-stale__actions">
+          <button className="tag-text-button is-danger" type="button" disabled={busy} onClick={async () => {
+            setBusy(true)
+            if (!await onClear(entries)) setBusy(false)
+          }}>
+            {t('清除 {count} 个地址的标签', { count: entries.length })}
+          </button>
+          <button className="tag-text-button" type="button" disabled={busy} onClick={() => setConfirming(false)}>{t('取消')}</button>
+        </span>
+      ) : (
+        <button className="tag-text-button tag-stale__clear" type="button" onClick={() => setConfirming(true)}>
+          <Eraser size={13} aria-hidden="true" />{t('清理')}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function AddressGroupSection({ group, collapsed, onToggle, onSelectGroup, canClearStale, onClearStale, ...actions }: ListActions & StaleActions & {
   group: AddressGroup
   collapsed: boolean
   onToggle: (source: AddressTagSource) => void
@@ -103,6 +144,9 @@ function AddressGroupSection({ group, collapsed, onToggle, onSelectGroup, ...act
         }}
       >
         <ul className="tag-group__rows">
+          {group.source === 'other' && (
+            <li><StaleGroupNote entries={group.entries} canClear={canClearStale} onClear={onClearStale} /></li>
+          )}
           {group.entries.map((entry) => (
             <AddressRow
               key={entry.address}
@@ -119,7 +163,7 @@ function AddressGroupSection({ group, collapsed, onToggle, onSelectGroup, ...act
   )
 }
 
-export function AddressGroupList({ groups, collapsed, onToggleGroup, onSelectGroup, ...actions }: ListActions & {
+export function AddressGroupList({ groups, collapsed, onToggleGroup, onSelectGroup, ...actions }: ListActions & StaleActions & {
   groups: AddressGroup[]
   collapsed: Set<AddressTagSource>
   onToggleGroup: (source: AddressTagSource) => void

@@ -1,15 +1,14 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { user } from './omnimail-fixtures'
 
-test('address tags find addresses that have not registered on a site', async ({ page }) => {
+type Entry = { sources: string[]; tags: string[] }
+
+async function mockAddressTags(page: Page, addresses: Record<string, Entry>) {
   await page.addInitScript(() => {
     localStorage.setItem('omnimail.deployment-guide.v1', 'seen')
     localStorage.setItem('omnimail-locale', 'zh-CN')
   })
-  const tags: Record<string, string[]> = {
-    'shop@example.com': ['网站A'],
-    'fresh@example.com': [],
-  }
+  const batches: Array<{ addresses: string[]; add?: string[]; remove?: string[] }> = []
   await page.route('**://*/api/**', async (route) => {
     const request = route.request()
     const path = decodeURIComponent(new URL(request.url()).pathname)
@@ -34,22 +33,32 @@ test('address tags find addresses that have not registered on a site', async ({ 
     if (path === '/api/mailboxes') return fulfill({ mailboxes: [] })
     if (path === '/api/domains') return fulfill({ domains: [] })
     if (path === '/api/address-tags') return fulfill({
-      addresses: Object.entries(tags).map(([address, list]) => ({
-        address, sources: ['omnimail'], isActive: true, tags: list,
-      })),
+      addresses: Object.entries(addresses).map(([address, entry]) => ({ address, ...entry })),
       tags: [],
     })
     if (path === '/api/address-tags/batch') {
-      const body = request.postDataJSON() as { addresses: string[]; add?: string[] }
-      for (const address of body.addresses) tags[address] = [...tags[address], ...(body.add ?? [])]
-      return fulfill({ addresses: body.addresses.map((address) => ({ address, tags: tags[address] })) })
+      const body = request.postDataJSON() as (typeof batches)[number]
+      batches.push(body)
+      for (const address of body.addresses) {
+        const entry = addresses[address]
+        entry.tags = [...entry.tags.filter((tag) => !body.remove?.includes(tag)), ...(body.add ?? [])]
+      }
+      return fulfill({ addresses: body.addresses.map((address) => ({ address, tags: addresses[address].tags })) })
     }
     if (path.startsWith('/api/address-tags/') && request.method() === 'PUT') {
       const address = path.slice('/api/address-tags/'.length)
-      tags[address] = (request.postDataJSON() as { tags: string[] }).tags
-      return fulfill({ address, tags: tags[address] })
+      addresses[address].tags = (request.postDataJSON() as { tags: string[] }).tags
+      return fulfill({ address, tags: addresses[address].tags })
     }
     return fulfill({ error: 'Not found' }, 404)
+  })
+  return batches
+}
+
+test('address tags find addresses that have not registered on a site', async ({ page }) => {
+  await mockAddressTags(page, {
+    'shop@example.com': { sources: ['omnimail'], tags: ['网站A'] },
+    'fresh@example.com': { sources: ['omnimail'], tags: [] },
   })
 
   await page.goto('/settings/address-tags')
@@ -92,4 +101,23 @@ test('address tags find addresses that have not registered on a site', async ({ 
   await bar.getByRole('combobox', { name: '给所选地址添加标签' }).press('Enter')
   await expect(rows.filter({ hasText: 'shop' }).locator('.tag-chip')).toHaveText(['网站A', 'GPT'])
   await expect(page.locator('.tag-toast')).toHaveText('已给 1 个地址加上“GPT”')
+})
+
+test('addresses that are no longer in a mailbox can only lose their tags', async ({ page }) => {
+  const batches = await mockAddressTags(page, {
+    'kept@example.com': { sources: ['omnimail'], tags: [] },
+    'gone@outlook.com': { sources: ['other'], tags: ['GPT'] },
+  })
+  await page.goto('/settings/address-tags')
+  const stale = page.locator('.tag-group').filter({ hasText: '已不在邮箱里' })
+  await expect(stale.locator('.tag-row')).toHaveCount(1)
+  await expect(stale).toContainText('只能移除标签')
+  await expect(stale.getByRole('button', { name: '为 gone@outlook.com 添加标签' })).toHaveCount(0)
+
+  await stale.getByRole('button', { name: '清理' }).click()
+  await stale.getByRole('button', { name: '清除 1 个地址的标签' }).click()
+  await expect(page.locator('.tag-toast')).toHaveText('已清理 1 个地址的标签')
+  await expect(stale).toHaveCount(0)
+  await expect(page.locator('.tag-row')).toHaveCount(1)
+  expect(batches).toEqual([{ addresses: ['gone@outlook.com'], remove: ['GPT'] }])
 })

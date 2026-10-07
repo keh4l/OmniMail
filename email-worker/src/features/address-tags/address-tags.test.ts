@@ -67,6 +67,14 @@ function insert(db: DatabaseSync, table: string, values: Row): void {
     .run(...names.map((name) => row[name]))
 }
 
+function own(db: DatabaseSync, userId: string, ...addresses: string[]): void {
+  for (const address of addresses) insert(db, 'mailboxes', { address, user_id: userId })
+}
+
+function staleTag(db: DatabaseSync, address: string, ...tags: string[]): void {
+  for (const tag of tags) db.prepare('INSERT INTO address_tags (user_id, address, tag) VALUES (?, ?, ?)').run('owner', address, tag)
+}
+
 function setup(options: { skip?: string } = {}) {
   const db = migratedDatabase(options)
   for (const id of ['owner', 'other']) insert(db, 'users', { id, email: `${id}@example.com` })
@@ -112,7 +120,7 @@ describe('AddressTagStore', () => {
     insert(db, 'yandex_mail_accounts', { id: 'yandex', user_id: 'owner', email: 'me@yandex.com' })
     insert(db, 'linux_do_mail_accounts', { id: 'linuxdo', user_id: 'owner', username: 'me@linux.do' })
     await store.replace('me@gmail.com', ['网站A'])
-    await store.replace('gone@old.test', ['网站A', '网站B'])
+    staleTag(db, 'gone@old.test', '网站A', '网站B')
 
     const { addresses, tags } = await store.list()
     const sources = Object.fromEntries(addresses.map((entry) => [entry.address, entry.sources]))
@@ -139,7 +147,8 @@ describe('AddressTagStore', () => {
   })
 
   it('replaces tags in order while reusing the existing spelling of a tag', async () => {
-    const { store } = setup()
+    const { db, store } = setup()
+    own(db, 'owner', 'a@mine.test', 'b@mine.test')
     expect(await store.replace('a@mine.test', ['GitHub', '网站A'])).toEqual(['GitHub', '网站A'])
     expect(await store.replace('b@mine.test', ['github', 'X'])).toEqual(['GitHub', 'X'])
     expect(await store.replace('a@mine.test', ['网站A', '网站C'])).toEqual(['网站A', '网站C'])
@@ -148,7 +157,8 @@ describe('AddressTagStore', () => {
   })
 
   it('adds and removes tags in bulk with per-address limits', async () => {
-    const { store } = setup()
+    const { db, store } = setup()
+    own(db, 'owner', 'a@mine.test', 'b@mine.test', 'full@mine.test')
     await store.replace('a@mine.test', ['旧标签'])
     expect(await store.batch(['a@mine.test', 'b@mine.test'], ['网站A'], ['旧标签'])).toEqual([
       { address: 'a@mine.test', tags: ['网站A'] },
@@ -161,7 +171,9 @@ describe('AddressTagStore', () => {
   })
 
   it('renames, merges and deletes tags only for the current user', async () => {
-    const { store, otherStore } = setup()
+    const { db, store, otherStore } = setup()
+    own(db, 'owner', 'a@mine.test', 'b@mine.test', 'c@mine.test')
+    own(db, 'other', 'x@theirs.test')
     await store.replace('a@mine.test', ['网站A'])
     await store.replace('b@mine.test', ['网站A', 'GitHub'])
     await store.replace('c@mine.test', ['github'])
@@ -180,8 +192,40 @@ describe('AddressTagStore', () => {
     const { db, store } = setup()
     const insertTag = db.prepare('INSERT INTO address_tags (user_id, address, tag) VALUES (?, ?, ?)')
     for (let index = 0; index < 300; index += 1) insertTag.run('owner', 'bulk@mine.test', `t${index}`)
+    own(db, 'owner', 'new@mine.test')
     await expect(store.replace('new@mine.test', ['t1'])).resolves.toEqual(['t1'])
     await expect(store.replace('new@mine.test', ['全新标签'])).rejects.toThrow('标签总数不能超过 300 个')
+  })
+
+  it('only adds tags to the user\'s own addresses but still lets stale tags be removed', async () => {
+    const { db, store } = setup()
+    own(db, 'owner', 'mine@mine.test')
+    own(db, 'other', 'theirs@mine.test')
+    staleTag(db, 'gone@old.test', '网站A', '网站B')
+    await expect(store.replace('stranger@else.test', ['网站A'])).rejects.toMatchObject({
+      status: 400,
+      message: '只能给你邮箱里的地址添加标签。',
+      details: { unknownAddresses: ['stranger@else.test'] },
+    })
+    await expect(store.replace('theirs@mine.test', ['网站A'])).rejects.toMatchObject({ status: 400 })
+    await expect(store.batch(['mine@mine.test', 'gone@old.test'], ['网站C'], [])).rejects.toMatchObject({
+      details: { unknownAddresses: ['gone@old.test'] },
+    })
+    expect((await store.list()).addresses.find((entry) => entry.address === 'mine@mine.test')?.tags).toEqual([])
+
+    // 账号删除后留下的标签不能再添加，但可以逐个移除或批量清理。
+    await expect(store.replace('gone@old.test', ['网站A', '新标签'])).rejects.toMatchObject({ status: 400 })
+    expect(await store.replace('gone@old.test', ['网站A'])).toEqual(['网站A'])
+    expect(await store.batch(['gone@old.test'], [], ['网站A'])).toEqual([{ address: 'gone@old.test', tags: [] }])
+    expect((await store.list()).addresses.map((entry) => entry.address)).toEqual(['mine@mine.test'])
+  })
+
+  it('accepts iCloud addresses once an iCloud account is configured', async () => {
+    const { db, store } = setup()
+    await expect(store.replace('alias_1@icloud.com', ['网站A'])).rejects.toMatchObject({ status: 400 })
+    insert(db, 'icloud_accounts', { id: 'icloud', user_id: 'owner', icloud_email: '' })
+    expect(await store.replace('alias_1@icloud.com', ['网站A'])).toEqual(['网站A'])
+    await expect(store.replace('alias_1@gmail.com', ['网站A'])).rejects.toMatchObject({ status: 400 })
   })
 
   it('reports a pending migration when the table is missing', async () => {
@@ -201,7 +245,8 @@ describe('address tag API', () => {
   })
 
   it('serves private responses for every write and read', async () => {
-    const { env } = setup()
+    const { db, env } = setup()
+    own(db, 'owner', 'me@example.com')
     const replaced = await replaceAddressTags(env, owner, 'Me@Example.com', request({ tags: ['网站A'] }))
     expect(replaced.status).toBe(200)
     expect(replaced.headers.get('Cache-Control')).toBe('private, no-store')
@@ -217,7 +262,7 @@ describe('address tag API', () => {
     const listed = await listAddressTags(env, owner)
     expect(listed.headers.get('Cache-Control')).toBe('private, no-store')
     expect(await listed.json()).toEqual({
-      addresses: [{ address: 'me@example.com', sources: ['other'], tags: ['网站A'] }],
+      addresses: [{ address: 'me@example.com', sources: ['omnimail'], isActive: true, tags: ['网站A'] }],
       tags: [{ name: '网站A', count: 1 }],
     })
   })
@@ -230,6 +275,12 @@ describe('address tag API', () => {
     expect((await replaceAddressTags(env, owner, 'nobody', request({ tags: [] }))).status).toBe(400)
     expect((await batchAddressTags(env, owner, request({ addresses: ['me@example.com'], add: 'x' }))).status).toBe(400)
     expect((await deleteAddressTag(env, owner, '不存在')).status).toBe(404)
+    const stranger = await batchAddressTags(env, owner, request({ addresses: ['stranger@else.test'], add: ['网站A'] }))
+    expect(stranger.status).toBe(400)
+    expect(await stranger.json()).toEqual({
+      error: '只能给你邮箱里的地址添加标签。',
+      unknownAddresses: ['stranger@else.test'],
+    })
   })
 
   it('leaves unexpected database failures to the global error handler', async () => {

@@ -32,7 +32,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       # 部署脚本会先按线上 DB 绑定应用未执行的 D1 迁移，再发布 Worker。
+      # Worker 已改名为 k-mail；用名称覆盖而不改 wrangler.jsonc，避免与上游冲突。
       - run: npm run deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_CI_OVERRIDE_NAME: k-mail

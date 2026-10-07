@@ -17,6 +17,7 @@ import {
   Send,
   Settings2,
   Star,
+  Tags,
   Trash2,
   UserCog,
   Users,
@@ -376,6 +377,17 @@ export function MailboxSidebar({
 
       <nav className="account-nav" aria-label={t('个人账户')}>
         <span className="account-nav-secondary">
+          <button
+            className={adminView === 'address-tags' ? 'is-active' : ''}
+            type="button"
+            onClick={() => {
+              closeMobileSidebar()
+              onAdminViewChange('address-tags')
+            }}
+          >
+            <Tags size={18} />
+            <span>{t('地址标签')}</span>
+          </button>
           <button
             className={adminView === 'api' ? 'is-active' : ''}
             type="button"

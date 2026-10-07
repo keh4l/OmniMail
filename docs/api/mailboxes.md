@@ -8,7 +8,7 @@
 
 > Read domains and create, enable, switch, or delete mailbox addresses.
 
-本分类共 **5** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
+本分类共 **10** 个端点。返回 [完整 API 索引](README.md) 或 [API 架构与安全说明](../API.md)。
 
 <!-- endpoint:GET /api/domains catalog:e04a28567ea7 -->
 ## `GET /api/domains`
@@ -130,5 +130,159 @@ curl --request PATCH \
 ```bash
 curl --request DELETE \
   --url "https://mail.example.com/api/mailboxes/owner%40example.com" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+<!-- endpoint:GET /api/address-tags catalog:f6cbb5b7ceb3 -->
+## `GET /api/address-tags`
+
+**列出地址标签 / List address tags**
+
+汇总当前用户的自有域名地址与已接入外部邮箱地址，返回每个地址的来源和标签，以及标签使用次数。
+
+> Aggregate the current user’s own-domain and connected external addresses with their sources, tags, and tag usage counts.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | No parameters |
+| 成功响应 | 200 · { addresses, tags } |
+
+> 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+>
+> Note: Tags are private to the current user; scoped device tokens such as the extension and Android cannot access them.
+
+### cURL 示例
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/address-tags" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+<!-- endpoint:PUT /api/address-tags/:address catalog:4a4b9f634ae0 -->
+## `PUT /api/address-tags/{address}`
+
+**设置地址的标签 / Set the tags of an address**
+
+整体替换某个地址的标签；每个地址最多 20 个，标签名 1–32 个字符，大小写不敏感去重。
+
+> Replace all tags of an address: up to 20 per address, 1–32 characters each, deduplicated case-insensitively.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · address; JSON · tags[] |
+| 成功响应 | 200 · { address, tags } |
+
+> 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+>
+> Note: Tags are private to the current user; scoped device tokens such as the extension and Android cannot access them.
+
+### cURL 示例
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/address-tags/owner%40example.com" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "tags": [
+    "example.com"
+  ]
+}'
+```
+
+<!-- endpoint:POST /api/address-tags/batch catalog:9cea3dd4de9e -->
+## `POST /api/address-tags/batch`
+
+**批量添加或移除标签 / Add or remove tags in bulk**
+
+为 1–200 个地址批量添加或移除标签，返回这些地址更新后的标签。
+
+> Add or remove tags for 1–200 addresses and return their updated tags.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | JSON · addresses[], add?[], remove?[] |
+| 成功响应 | 200 · { addresses } |
+
+> 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+>
+> Note: Tags are private to the current user; scoped device tokens such as the extension and Android cannot access them.
+
+### cURL 示例
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/address-tags/batch" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "addresses": [
+    "owner@example.com"
+  ],
+  "add": [
+    "example.com"
+  ]
+}'
+```
+
+<!-- endpoint:PATCH /api/address-tags/tags/:tag catalog:5c2f84174b4a -->
+## `PATCH /api/address-tags/tags/{tag}`
+
+**重命名或合并标签 / Rename or merge a tag**
+
+把标签重命名到所有地址上；新名称已存在时合并为同一个标签。
+
+> Rename a tag on every address; renaming to an existing tag merges them.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · tag; JSON · name |
+| 成功响应 | 200 · { tag } |
+
+> 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+>
+> Note: Tags are private to the current user; scoped device tokens such as the extension and Android cannot access them.
+
+### cURL 示例
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/address-tags/tags/example.com" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "example.org"
+}'
+```
+
+<!-- endpoint:DELETE /api/address-tags/tags/:tag catalog:5ac1222b92a0 -->
+## `DELETE /api/address-tags/tags/{tag}`
+
+**删除标签 / Delete a tag**
+
+从当前用户的所有地址上移除该标签，不影响地址和邮件。
+
+> Remove the tag from all of the user’s addresses without affecting addresses or mail.
+
+| 项目 | 内容 |
+| --- | --- |
+| 认证 | 登录用户；支持 Session Cookie 或 Access Token |
+| 请求 | Path · tag |
+| 成功响应 | 200 · { ok: true } |
+
+> 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+>
+> Note: Tags are private to the current user; scoped device tokens such as the extension and Android cannot access them.
+
+### cURL 示例
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/address-tags/tags/example.com" \
   --header "Authorization: Bearer om_at_..."
 ```

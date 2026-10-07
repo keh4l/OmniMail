@@ -1,23 +1,28 @@
-import { LoaderCircle, Plus, RefreshCw, Settings2, Tags } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Inbox, Plus, RefreshCw, SearchX, Settings2, Tags } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../../../shared/api'
 import { t } from '../../../shared/i18n'
 import { AdminPageHeader } from '../../admin/shell/AdminPageHeader'
-import { addressTagApi, type AddressTagEntry, type AddressTagUpdate } from '../api/address-tag-api-client'
+import { addressTagApi, type AddressTagEntry, type AddressTagSource, type AddressTagUpdate } from '../api/address-tag-api-client'
 import {
   applyAddressTagUpdates,
   emptyAddressTagFilters,
   filterAddressEntries,
+  groupEntriesBySource,
   mergeHideMyEmailAliases,
   tagKey,
   tagSummaries,
+  type AddressGroup,
   type AddressTagFilters,
+  type TagFilterState,
 } from '../model/addressTagFilter'
-import { AddressTagBulkBar } from './AddressTagBulkBar'
-import { AddressTagFiltersBar } from './AddressTagFilters'
-import { AddressTagManager } from './AddressTagManager'
-import { ADDRESS_TAG_SUGGESTIONS_ID, AddressTagRow } from './AddressTagRow'
+import { AddressGroupList } from './AddressGroupList'
+import { SelectionBar } from './SelectionBar'
+import { TagFilterBar } from './TagFilterBar'
+import { TagManagerPopover } from './TagManagerPopover'
 import '../styles/address-tags.css'
+import '../styles/address-tags-controls.css'
+import '../styles/address-tags-overlays.css'
 
 const BATCH_SIZE = 200
 type AliasState = 'idle' | 'loading' | 'ready' | 'partial'
@@ -31,6 +36,10 @@ function manualAddress(query: string): string {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) && address.length <= 254 ? address : ''
 }
 
+function isTyping(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+}
+
 export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
   const [entries, setEntries] = useState<AddressTagEntry[]>([])
   const [aliases, setAliases] = useState<string[]>([])
@@ -40,8 +49,14 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [filters, setFilters] = useState<AddressTagFilters>(emptyAddressTagFilters)
+  const [mode, setMode] = useState<TagFilterState>('include')
+  const [collapsed, setCollapsed] = useState<Set<AddressTagSource>>(() => new Set())
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const [managerOpen, setManagerOpen] = useState(false)
+  const anchor = useRef<string | null>(null)
+  const managerButton = useRef<HTMLButtonElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const closeManager = useCallback(() => setManagerOpen(false), [])
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true)
@@ -65,9 +80,7 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
         accounts.filter((account) => account.hasCookies).map((account) => api.iCloudAliases(account.id, signal)),
       )
       if (signal?.aborted) return
-      setAliases(results.flatMap((result) => (
-        result.status === 'fulfilled' ? result.value.aliases.map((alias) => alias.email) : []
-      )))
+      setAliases(results.flatMap((result) => (result.status === 'fulfilled' ? result.value.aliases.map((alias) => alias.email) : [])))
       setAliasState(results.some((result) => result.status === 'rejected') ? 'partial' : 'ready')
     } catch {
       if (!signal?.aborted) setAliasState('partial')
@@ -83,14 +96,31 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
 
   useEffect(() => {
     if (!notice) return
-    const timer = window.setTimeout(() => setNotice(''), 3000)
+    const timer = window.setTimeout(() => setNotice(''), 2600)
     return () => window.clearTimeout(timer)
   }, [notice])
+
+  // 「/」聚焦搜索；没有在输入时按 Esc 清空选择。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isTyping(event.target) || event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.key === '/') {
+        event.preventDefault()
+        searchRef.current?.focus()
+      } else if (event.key === 'Escape') {
+        setSelected(new Set())
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   const all = useMemo(() => mergeHideMyEmailAliases(entries, aliases), [entries, aliases])
   const tags = useMemo(() => tagSummaries(all), [all])
   const visible = useMemo(() => filterAddressEntries(all, filters), [all, filters])
-  const chosen = visible.filter((entry) => selected.has(entry.address)).map((entry) => entry.address)
+  const groups = useMemo(() => groupEntriesBySource(visible), [visible])
+  const chosen = useMemo(() => visible.filter((entry) => selected.has(entry.address)), [visible, selected])
+  const removable = useMemo(() => tagSummaries(chosen), [chosen])
   const candidate = manualAddress(filters.query)
   const canAddCandidate = Boolean(candidate) && !all.some((entry) => entry.address === candidate)
 
@@ -98,29 +128,32 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
     setEntries((current) => applyAddressTagUpdates(current, updates))
   }
 
-  async function saveTags(address: string, next: string[]): Promise<boolean> {
+  const saveTags = useCallback(async (address: string, next: string[]) => {
     try {
-      applyUpdates([await addressTagApi.replace(address, next)])
-      return true
+      const update = await addressTagApi.replace(address, next)
+      setEntries((current) => applyAddressTagUpdates(current, [update]))
+      return update.tags
     } catch (saveError) {
       setError(errorText(saveError, t('无法保存标签。')))
-      return false
+      return null
     }
-  }
+  }, [])
 
-  async function bulkUpdate(change: { add?: string[]; remove?: string[] }): Promise<boolean> {
+  async function applyBulk(bulkMode: 'add' | 'remove', tag: string) {
+    const addresses = chosen.map((entry) => entry.address)
+    if (!addresses.length) return
     setBusy(true)
     setError('')
     try {
-      for (let index = 0; index < chosen.length; index += BATCH_SIZE) {
-        applyUpdates((await addressTagApi.batch(chosen.slice(index, index + BATCH_SIZE), change)).addresses)
+      for (let index = 0; index < addresses.length; index += BATCH_SIZE) {
+        const change = bulkMode === 'add' ? { add: [tag] } : { remove: [tag] }
+        applyUpdates((await addressTagApi.batch(addresses.slice(index, index + BATCH_SIZE), change)).addresses)
       }
-      setNotice(t('已更新 {count} 个地址的标签', { count: chosen.length }))
-      setSelected(new Set())
-      return true
+      setNotice(bulkMode === 'add'
+        ? t('已给 {count} 个地址加上“{tag}”', { count: addresses.length, tag })
+        : t('已从 {count} 个地址移除“{tag}”', { count: addresses.length, tag }))
     } catch (bulkError) {
       setError(errorText(bulkError, t('无法批量更新标签。')))
-      return false
     } finally {
       setBusy(false)
     }
@@ -150,16 +183,42 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
     }
   }
 
-  function select(address: string, checked: boolean) {
+  // Shift 点击从上一次点击的地址选到当前地址（按当前显示顺序）。
+  const select = useCallback((address: string, checked: boolean, range: boolean) => {
+    const order = groups.flatMap((group) => (collapsed.has(group.source) ? [] : group.entries.map((entry) => entry.address)))
+    const from = anchor.current ? order.indexOf(anchor.current) : -1
+    const to = order.indexOf(address)
+    const targets = range && from >= 0 && to >= 0 ? order.slice(Math.min(from, to), Math.max(from, to) + 1) : [address]
+    anchor.current = address
     setSelected((current) => {
       const next = new Set(current)
-      if (checked) next.add(address)
-      else next.delete(address)
+      for (const target of targets) {
+        if (checked) next.add(target)
+        else next.delete(target)
+      }
+      return next
+    })
+  }, [groups, collapsed])
+
+  function selectGroup(group: AddressGroup, checked: boolean) {
+    setSelected((current) => {
+      const next = new Set(current)
+      for (const entry of group.entries) {
+        if (checked) next.add(entry.address)
+        else next.delete(entry.address)
+      }
       return next
     })
   }
 
-  const allVisibleSelected = visible.length > 0 && chosen.length === visible.length
+  function toggleGroup(source: AddressTagSource) {
+    setCollapsed((current) => {
+      const next = new Set(current)
+      if (next.has(source)) next.delete(source)
+      else next.add(source)
+      return next
+    })
+  }
 
   return (
     <main className="admin-workspace address-tags-workspace">
@@ -171,7 +230,14 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
         className="address-tags__header"
         actions={(
           <div className="user-header-actions">
-            <button className="button button--secondary" type="button" aria-expanded={managerOpen} onClick={() => setManagerOpen((open) => !open)}>
+            <button
+              ref={managerButton}
+              className="button button--secondary"
+              type="button"
+              aria-haspopup="dialog"
+              aria-expanded={managerOpen}
+              onClick={() => setManagerOpen((open) => !open)}
+            >
               <Settings2 size={16} />{t('管理标签')}
             </button>
             <button className="button button--secondary" type="button" disabled={loading} onClick={() => {
@@ -183,60 +249,48 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
           </div>
         )}
       />
-      {error && <p className="address-tags-feedback is-error" role="alert">{error}</p>}
-      {notice && <p className="address-tags-feedback" role="status">{notice}</p>}
-      {managerOpen && (
-        <AddressTagManager
-          tags={tags}
-          busy={busy}
-          onRename={(from, to) => changeTag(() => addressTagApi.rename(from, to), from, to, t('标签已重命名'))}
-          onDelete={(tag) => changeTag(() => addressTagApi.remove(tag), tag, null, t('标签已删除'))}
-          onClose={() => setManagerOpen(false)}
-        />
+      {error && (
+        <p className="tag-alert" role="alert">
+          {error}
+          <button type="button" aria-label={t('关闭')} onClick={() => setError('')}>×</button>
+        </p>
       )}
-      <section className="admin-card address-tags-card" aria-busy={loading}>
-        <AddressTagFiltersBar entries={all} tags={tags} filters={filters} onChange={setFilters} />
-        {chosen.length > 0 && (
-          <AddressTagBulkBar count={chosen.length} busy={busy} onApply={bulkUpdate} onClear={() => setSelected(new Set())} />
+      <section className="admin-card tag-card" aria-busy={loading}>
+        <TagFilterBar
+          entries={all}
+          tags={tags}
+          filters={filters}
+          mode={mode}
+          resultCount={visible.length}
+          searchRef={searchRef}
+          onChange={setFilters}
+          onModeChange={setMode}
+        />
+        {aliasState !== 'idle' && aliasState !== 'ready' && (
+          <p className="tag-card__status" data-state={aliasState}>
+            {aliasState === 'loading' ? t('正在读取 iCloud 隐藏邮箱…') : t('部分 iCloud 隐藏邮箱暂时无法读取')}
+          </p>
         )}
-        <div className="address-tags-list-head">
-          <label className="address-tags-check">
-            <input
-              type="checkbox"
-              checked={allVisibleSelected}
-              disabled={!visible.length}
-              onChange={(event) => setSelected(event.target.checked ? new Set(visible.map((entry) => entry.address)) : new Set())}
-            />
-            <span>{t('全选')}</span>
-          </label>
-          <span>{t('显示 {shown} / {total} 个地址', { shown: visible.length, total: all.length })}</span>
-          {aliasState === 'loading' && (
-            <span className="address-tags-hint"><LoaderCircle className="spin" size={13} />{t('正在读取 iCloud 隐藏邮箱…')}</span>
-          )}
-          {aliasState === 'partial' && (
-            <span className="address-tags-hint is-warning">{t('部分 iCloud 隐藏邮箱暂时无法读取')}</span>
-          )}
-        </div>
         {loading && !all.length ? (
-          <div className="address-tags-empty" role="status"><LoaderCircle className="spin" size={18} />{t('正在读取地址…')}</div>
-        ) : visible.length ? (
-          <ul className="address-tags-list">
-            {visible.map((entry) => (
-              <AddressTagRow
-                key={entry.address}
-                entry={entry}
-                selected={selected.has(entry.address)}
-                onSelect={select}
-                onSave={saveTags}
-                onCopy={(address) => {
-                  void navigator.clipboard?.writeText(address).then(() => setNotice(t('已复制：{address}', { address })))
-                }}
-              />
-            ))}
+          <ul className="tag-skeleton" aria-label={t('正在读取地址…')}>
+            {Array.from({ length: 6 }, (_, index) => <li key={index} style={{ animationDelay: `${index * 80}ms` }} />)}
           </ul>
+        ) : groups.length ? (
+          <AddressGroupList
+            groups={groups}
+            collapsed={collapsed}
+            selected={selected}
+            suggestions={tags}
+            onToggleGroup={toggleGroup}
+            onSelect={select}
+            onSelectGroup={selectGroup}
+            onSave={saveTags}
+          />
         ) : (
-          <div className="address-tags-empty">
-            <span>{all.length ? t('没有符合筛选条件的地址。') : t('还没有可以打标签的地址。先创建邮箱地址或接入外部邮箱。')}</span>
+          <div className="tag-empty">
+            {all.length ? <SearchX size={28} aria-hidden="true" /> : <Inbox size={28} aria-hidden="true" />}
+            <strong>{all.length ? t('没有符合条件的地址') : t('还没有可以打标签的地址')}</strong>
+            <span>{all.length ? t('换个条件试试，或清除筛选。') : t('先创建邮箱地址或接入外部邮箱。')}</span>
             {canAddCandidate && (
               <button className="button button--small button--secondary" type="button" onClick={() => {
                 applyUpdates([{ address: candidate, tags: [] }])
@@ -248,9 +302,24 @@ export function AddressTagsPage({ iCloudEnabled }: { iCloudEnabled: boolean }) {
           </div>
         )}
       </section>
-      <datalist id={ADDRESS_TAG_SUGGESTIONS_ID}>
-        {tags.map((tag) => <option key={tag.name} value={tag.name} />)}
-      </datalist>
+      <SelectionBar
+        count={chosen.length}
+        suggestions={tags}
+        removable={removable}
+        busy={busy}
+        onApply={(bulkMode, tag) => void applyBulk(bulkMode, tag)}
+        onClear={() => setSelected(new Set())}
+      />
+      <TagManagerPopover
+        open={managerOpen}
+        anchorRef={managerButton}
+        tags={tags}
+        busy={busy}
+        onClose={closeManager}
+        onRename={(from, to) => changeTag(() => addressTagApi.rename(from, to), from, to, t('标签已重命名'))}
+        onDelete={(tag) => changeTag(() => addressTagApi.remove(tag), tag, null, t('标签已删除'))}
+      />
+      <p className="tag-toast" role="status" data-open={Boolean(notice)} data-lifted={chosen.length > 0}>{notice}</p>
     </main>
   )
 }

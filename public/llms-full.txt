@@ -1,0 +1,3430 @@
+# OmniMail API
+
+> OmniMail 是部署在 Cloudflare Workers 上的自托管多域名 Webmail。本文档面向 AI 与自动化工具，说明如何认证并调用当前实例的 HTTP API。
+
+- 基础地址：本文件所在站点的源地址 + `/api`。例如文件位于 `https://mail.example.com/llms.txt`，接口就是 `https://mail.example.com/api/...`。
+- 接口总数：178。请求与响应均为 JSON（附件与原文下载除外），错误统一返回 `{ "error": "说明" }`。
+- 路径中的 `{address}`、`{id}` 等是路径参数，需要 URL 编码，例如 `owner%40example.com`。
+- 当前未带版本前缀的 `/api/*` 主要服务于同仓库客户端，字段可能随版本增加，读取时请忽略未知字段。
+
+## 认证
+
+1. `POST /api/auth/token`，JSON `{ "email", "password", "deviceName", "mfaCode"? }`，返回 `accessToken`（15 分钟）和 `refreshToken`（30 天）。令牌明文只返回一次。
+2. 之后每个请求带上 `Authorization: Bearer <accessToken>`。
+3. Access Token 过期后，用 `POST /api/auth/token/refresh`，JSON `{ "refreshToken" }` 同时轮换两个令牌。
+4. 浏览器扩展、Android 等受限设备令牌只能访问其 Scope 允许的接口，越权返回 403。
+5. 速率受限时返回 429；D1 日额度耗尽等服务暂停时返回 503，可按响应提示稍后重试。
+
+> 示例中的 `https://mail.example.com/api` 请替换为实际实例地址，`om_at_...` 替换为 Access Token。
+
+## 系统与公开入口（System and public entry points）
+
+健康检查、初始化、注册、邀请落地、代理与 Webhook。
+
+### GET /api/health
+
+服务健康检查 / Service health check
+
+确认 Worker 路由可以正常响应，不访问用户数据。
+
+- 权限：公开，无需登录
+- 请求：No parameters
+- 响应：200 · { ok: true }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/health"
+```
+
+### GET /api/config
+
+读取公开运行配置 / Read public runtime configuration
+
+获取应用名称、注册方式、功能开关和部署就绪状态。
+
+- 权限：公开，无需登录
+- 请求：No parameters
+- 响应：200 · AppConfig
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/config"
+```
+
+### POST /api/setup
+
+首次初始化主管理员 / Complete first-time owner setup
+
+仅在实例未初始化时创建主管理员并写入登录 Cookie。
+
+- 权限：公开，无需登录
+- 请求：JSON · displayName, password, setupToken
+- 响应：200 · { user } + Set-Cookie
+- 注意：SETUP_TOKEN 至少 32 字节，完成初始化后应从 Worker Secret 中移除。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/setup" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "displayName": "Owner",
+  "password": "strong-password",
+  "setupToken": "setup-secret"
+}'
+```
+
+### POST /api/register
+
+外部注册普通账户 / Register a public account
+
+在管理员允许注册且 Turnstile 验证通过时创建普通用户。
+
+- 权限：公开，无需登录
+- 请求：JSON · email, displayName, password, turnstileToken
+- 响应：201 · { user } + Set-Cookie
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/register" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "email": "user@example.com",
+  "displayName": "User",
+  "password": "strong-password",
+  "turnstileToken": "turnstile-token"
+}'
+```
+
+### GET /api/invitations/{token}
+
+预览邀请链接 / Preview an invitation
+
+读取邀请状态、域名、地址模式和账户策略，不消耗邀请次数。
+
+- 权限：公开，无需登录
+- 请求：Path · token
+- 响应：200 · { invite }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/invitations/invite_token"
+```
+
+### POST /api/invitations/{token}
+
+接受邀请并创建账户 / Accept an invitation and create an account
+
+按邀请策略创建用户和邮箱地址，随后使用登录接口进入账户。
+
+- 权限：公开，无需登录
+- 请求：JSON · displayName, localPart?, password, turnstileToken?
+- 响应：201 · { email }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/invitations/invite_token" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "displayName": "Invited User",
+  "localPart": "user",
+  "password": "strong-password",
+  "turnstileToken": "turnstile-token"
+}'
+```
+
+### GET /api/remote-images
+
+代理安全远程图片 / Proxy a safe remote image
+
+通过 Worker 拉取 HTTPS 邮件图片，限制跳转、类型和大小。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · url=https://images.example/image.png
+- 响应：200 · image bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/remote-images?url=https%3A%2F%2Fimages.example%2Fimage.png" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "image.png"
+```
+
+### POST /api/webhooks/resend
+
+接收 Resend 投递事件 / Receive Resend delivery events
+
+验证 Svix 签名后更新已发送邮件的投递状态。
+
+- 权限：Webhook 签名验证
+- 请求：Headers · svix-id, svix-timestamp, svix-signature; JSON event
+- 响应：200 · { ok: true }
+- 注意：签名必须由 Resend 生成，示例占位值不能用于真实请求。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/webhooks/resend" \
+  --header "svix-id: msg_..." \
+  --header "svix-timestamp: 1700000000" \
+  --header "svix-signature: v1,..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "type": "email.delivered",
+  "data": {
+    "email_id": "resend_email_id"
+  }
+}'
+```
+
+## 认证与账户（Authentication and account）
+
+网页登录、设备令牌、MFA、扩展授权和账户生命周期。
+
+### GET /api/auth/linux-do
+
+开始 Linux DO 登录 / Start Linux DO sign-in
+
+生成 OAuth state 并重定向到 Linux DO Connect。
+
+- 权限：公开，无需登录
+- 请求：Query · returnTo? (allowed application URL)
+- 响应：302 · Linux DO authorization URL
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/auth/linux-do?returnTo=https%3A%2F%2Fmail.example.com%2F"
+```
+
+### GET /api/auth/linux-do/callback
+
+完成 Linux DO 回调 / Complete the Linux DO callback
+
+校验 state、交换用户资料并创建或登录账户。
+
+- 权限：公开，无需登录
+- 请求：Query · code, state
+- 响应：302 · returnTo or MFA login URL
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/auth/linux-do/callback?code=oauth_code&state=oauth_state"
+```
+
+### POST /api/login
+
+密码登录 / Sign in with a password
+
+验证邮箱和密码；启用 MFA 时先返回二次验证挑战。
+
+- 权限：公开，无需登录
+- 请求：JSON · email, password
+- 响应：200 · { user } or 202 · { mfaRequired, email }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/login" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "email": "user@example.com",
+  "password": "your-password"
+}'
+```
+
+### POST /api/login/mfa
+
+完成网页登录 MFA / Complete web-login MFA
+
+使用挑战 Cookie 和验证码或恢复码完成网页登录。
+
+- 权限：公开，无需登录
+- 请求：Cookie · omnimail_mfa_challenge; JSON · code
+- 响应：200 · { user } + Set-Cookie
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/login/mfa" \
+  --header "Cookie: omnimail_mfa_challenge=..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "code": "123456"
+}'
+```
+
+### POST /api/auth/token
+
+签发设备令牌 / Issue device tokens
+
+用密码和可选 MFA 签发短期 Access Token 与轮换 Refresh Token。
+
+- 权限：公开，无需登录
+- 请求：JSON · email, password, deviceName, mfaCode?
+- 响应：200 · { accessToken, expiresIn, refreshToken, refreshExpiresIn, scopes, user }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/auth/token" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "email": "user@example.com",
+  "password": "your-password",
+  "deviceName": "My automation",
+  "mfaCode": "123456"
+}'
+```
+
+### POST /api/auth/token/refresh
+
+轮换设备令牌 / Rotate device tokens
+
+使用有效 Refresh Token 同时轮换 Access Token 和 Refresh Token。
+
+- 权限：公开，无需登录
+- 请求：JSON · refreshToken
+- 响应：200 · new token pair
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/auth/token/refresh" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "refreshToken": "om_rt_..."
+}'
+```
+
+### POST /api/auth/token/revoke
+
+撤销 Refresh Token / Revoke a refresh token
+
+幂等撤销指定设备会话，即使已经撤销也返回成功。
+
+- 权限：公开，无需登录
+- 请求：JSON · refreshToken
+- 响应：200 · { ok: true }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/auth/token/revoke" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "refreshToken": "om_rt_..."
+}'
+```
+
+### POST /api/auth/extension/authorize
+
+创建扩展授权码 / Create an extension authorization code
+
+由已登录网页确认扩展、回调地址和 PKCE challenge。
+
+- 权限：仅浏览器 Session Cookie
+- 请求：Same-origin Cookie; JSON · clientId, redirectUri, state, codeChallenge
+- 响应：200 · { redirectTo }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/auth/extension/authorize" \
+  --cookie "omnimail_session=..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "clientId": "abcdefghijklmnopabcdefghijklmnop",
+  "redirectUri": "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/omnimail",
+  "state": "state_value_32_characters_long_123",
+  "codeChallenge": "pkce_challenge_43_characters_long_value____"
+}'
+```
+
+### POST /api/auth/extension/exchange
+
+交换扩展授权码 / Exchange an extension authorization code
+
+扩展使用一次性授权码和 PKCE verifier 换取受限设备令牌。
+
+- 权限：公开，无需登录
+- 请求：Extension Origin; JSON · code, codeVerifier, clientId, redirectUri
+- 响应：200 · scoped token pair
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/auth/extension/exchange" \
+  --header "Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop" \
+  --header "Content-Type: application/json" \
+  --data '{
+  "code": "om_ac_...",
+  "codeVerifier": "pkce_verifier_43_characters_long_value_____",
+  "clientId": "abcdefghijklmnopabcdefghijklmnop",
+  "redirectUri": "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/omnimail"
+}'
+```
+
+### GET /api/session
+
+查询当前会话 / Read the current session
+
+接受浏览器 Cookie 或 Bearer Token；未登录时 user 为 null。
+
+- 权限：可选登录，登录后可能返回更多信息
+- 请求：Optional · Cookie or Authorization header
+- 响应：200 · { user: User | null }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/session"
+```
+
+### POST /api/client-errors
+
+记录客户端异常 / Record a client error
+
+接收已登录客户端的安全化崩溃摘要，并写入 Cloudflare Workers Logs。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · crashId, errorName, message, componentStack, path
+- 响应：204 · No Content
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/client-errors" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "crashId": "ui-m123abc",
+  "errorName": "TypeError",
+  "message": "Render failed",
+  "componentStack": "at Mailbox",
+  "path": "/mail/inbox"
+}'
+```
+
+### POST /api/logout
+
+退出当前会话 / Sign out the current session
+
+删除浏览器会话，或撤销当前 Bearer 设备会话。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No body
+- 响应：200 · { ok: true }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/logout" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/auth/devices
+
+列出设备会话 / List device sessions
+
+列出当前用户的设备、Scope、最近使用和撤销状态，不返回令牌明文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { devices }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/auth/devices" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### DELETE /api/auth/devices/{id}
+
+撤销指定设备 / Revoke a device session
+
+撤销当前用户拥有的一个设备会话。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/auth/devices/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### PATCH /api/account
+
+更新账户资料或密码 / Update profile or password
+
+修改显示名称，或验证当前密码后设置新密码并撤销全部设备令牌。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · displayName?; currentPassword + newPassword?
+- 响应：200 · { user }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/account" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "displayName": "New Name"
+}'
+```
+
+### DELETE /api/account
+
+注销当前账户 / Delete the current account
+
+普通用户用登录邮箱确认；临时用户用当前密码确认。管理员不能自助注销。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · confirmationEmail? or currentPassword?
+- 响应：200 · { ok: true } + cleared sessions
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/account" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "confirmationEmail": "user@example.com"
+}'
+```
+
+### GET /api/account/mfa
+
+读取 MFA 状态 / Read MFA status
+
+返回 MFA 是否可配置、是否启用和剩余恢复码数量。
+
+- 权限：管理员或主管理员
+- 请求：No parameters
+- 响应：200 · { ready, enabled, recoveryCodesRemaining }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/account/mfa" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/account/mfa/setup
+
+开始 MFA 配置 / Start MFA setup
+
+生成一次性 TOTP Secret、二维码 URI 和设置期限。
+
+- 权限：管理员或主管理员
+- 请求：No body
+- 响应：200 · { secret, uri }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/account/mfa/setup" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/account/mfa/confirm
+
+确认启用 MFA / Confirm MFA setup
+
+验证当前 TOTP 后启用 MFA，并仅返回一次恢复码。
+
+- 权限：管理员或主管理员
+- 请求：JSON · code
+- 响应：200 · { enabled: true, recoveryCodes }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/account/mfa/confirm" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "code": "123456"
+}'
+```
+
+### DELETE /api/account/mfa
+
+关闭 MFA / Disable MFA
+
+使用有效 TOTP 或恢复码关闭 MFA 并清除恢复码。
+
+- 权限：管理员或主管理员
+- 请求：JSON · code
+- 响应：200 · { enabled: false }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/account/mfa" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "code": "123456"
+}'
+```
+
+### GET /api/desktop/accounts
+
+桌面导入目录 / Desktop import catalog
+
+仅设备令牌；返回当前用户的域名邮箱和可导入账号元数据，不解密凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { accounts: [{ id, provider, email, name, ready, note }] }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/desktop/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/desktop/credentials
+
+导入所选邮箱凭据 / Import selected mailbox credentials
+
+仅设备令牌；重新验证密码和 MFA，最多导出 50 个自有账号。返回应用密码、原 Microsoft OAuth 应用与刷新令牌，或用于本地管理隐藏地址的 iCloud 地区、Apple 账户和 Cookie。禁止缓存和记录响应。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · password, mfaCode?, accounts: [{ provider, id }]
+- 响应：200 · { accounts }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/desktop/credentials" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "password": "your-password",
+  "mfaCode": "123456",
+  "accounts": [
+    {
+      "provider": "gmail",
+      "id": "account-id"
+    }
+  ]
+}'
+```
+
+## 域名与邮箱地址（Domains and mailboxes）
+
+读取域名并创建、启停、切换或删除邮箱地址。
+
+### GET /api/domains
+
+读取可用收件域名 / List available receiving domains
+
+返回当前实例中的域名及其启用状态和邮箱数量。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { domains }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/domains" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/mailboxes
+
+列出当前用户邮箱 / List current-user mailboxes
+
+返回当前用户可见的邮箱地址、主邮箱和启用状态。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { mailboxes }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/mailboxes" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/mailboxes
+
+创建邮箱地址 / Create a mailbox address
+
+在启用域名下创建地址；受角色权限、邮箱上限和地址规则限制。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · address
+- 响应：200/201 · { mailbox }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/mailboxes" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "address": "owner@example.com"
+}'
+```
+
+### PATCH /api/mailboxes/{address}
+
+启停邮箱或设为主邮箱 / Enable, disable, or make a mailbox primary
+
+更新拥有的邮箱地址；停用或设主地址时会执行安全约束。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · address; JSON · isActive? or isPrimary?
+- 响应：200 · { mailbox }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/mailboxes/owner%40example.com" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "isPrimary": true
+}'
+```
+
+### DELETE /api/mailboxes/{address}
+
+删除非主邮箱 / Delete a non-primary mailbox
+
+立即隐藏非主邮箱，并启动邮件、草稿和附件的异步清理。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · address
+- 响应：202 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/mailboxes/owner%40example.com" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/address-tags
+
+列出地址标签 / List address tags
+
+汇总当前用户的自有域名地址与已接入外部邮箱地址，返回每个地址的来源和标签，以及标签使用次数。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { addresses, tags }
+- 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/address-tags" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### PUT /api/address-tags/{address}
+
+设置地址的标签 / Set the tags of an address
+
+整体替换某个地址的标签；每个地址最多 20 个，标签名 1–32 个字符，大小写不敏感去重。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · address; JSON · tags[]
+- 响应：200 · { address, tags }
+- 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/address-tags/owner%40example.com" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "tags": [
+    "example.com"
+  ]
+}'
+```
+
+### POST /api/address-tags/batch
+
+批量添加或移除标签 / Add or remove tags in bulk
+
+为 1–200 个地址批量添加或移除标签，返回这些地址更新后的标签。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · addresses[], add?[], remove?[]
+- 响应：200 · { addresses }
+- 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/address-tags/batch" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "addresses": [
+    "owner@example.com"
+  ],
+  "add": [
+    "example.com"
+  ]
+}'
+```
+
+### PATCH /api/address-tags/tags/{tag}
+
+重命名或合并标签 / Rename or merge a tag
+
+把标签重命名到所有地址上；新名称已存在时合并为同一个标签。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · tag; JSON · name
+- 响应：200 · { tag }
+- 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/address-tags/tags/example.com" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "example.org"
+}'
+```
+
+### DELETE /api/address-tags/tags/{tag}
+
+删除标签 / Delete a tag
+
+从当前用户的所有地址上移除该标签，不影响地址和邮件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · tag
+- 响应：200 · { ok: true }
+- 注意：标签只对当前用户可见；扩展和 Android 等受限设备令牌无法访问。
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/address-tags/tags/example.com" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+## 邮件（Messages）
+
+列表、详情、状态、附件、原文、发信、回复和翻译。
+
+### GET /api/mail-notifications
+
+读取统一新邮件通知摘要 / Read unified new-mail notification summaries
+
+按来源读取已连接邮箱的轻量元数据，不返回正文或附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · sources?, limit=1..100?
+- 响应：200 · { messages, sources, unread }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/mail-notifications?limit=50&sources=icloud,linuxdo" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/messages
+
+查询邮件列表 / Query messages
+
+按文件夹、搜索词、邮箱或域名筛选，并使用不透明游标分页。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · folder, q?, mailbox?, domain?, limit=1..100?, cursor?, version?
+- 响应：200 · { messages, counts, page, version, unchanged }
+- 注意：翻页期间必须保持筛选参数不变；cursor 不能解析或修改。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/messages?folder=inbox&limit=30" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/messages
+
+主动发送邮件 / Send a message
+
+通过当前域名配置的发信服务发送，并把结果保存到已发送。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · mailboxAddress, to, subject, text, idempotencyKey
+- 响应：200/202 · { message }
+- 注意：需要发信权限；相同 idempotencyKey 不会重复投递或重复计入限速。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/messages" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "mailboxAddress": "owner@example.com",
+  "to": "friend@example.net",
+  "subject": "Hello",
+  "text": "Message body",
+  "idempotencyKey": "request_12345678"
+}'
+```
+
+### PATCH /api/messages/bulk
+
+批量更新邮件 / Bulk-update messages
+
+一次更新最多 50 封当前用户邮件的已读、星标、文件夹或删除状态。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · ids[1..50], action=read|unread|star|unstar|trash|restore|delete
+- 响应：200 · { ok, updatedCount }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/messages/bulk" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "ids": [
+    "message_1",
+    "message_2"
+  ],
+  "action": "read"
+}'
+```
+
+### GET /api/messages/{id}
+
+读取邮件详情 / Read message details
+
+读取正文、附件元数据和按时间排序的会话摘要。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { message, thread }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/messages/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### PATCH /api/messages/{id}
+
+更新邮件状态 / Update message state
+
+修改已读、星标或文件夹状态，移入垃圾箱时计算清理日期。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · isRead?, isStarred?, folder=inbox|sent|trash?
+- 响应：200 · { ok: true }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/messages/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "isRead": true,
+  "isStarred": true
+}'
+```
+
+### DELETE /api/messages/{id}
+
+永久删除垃圾箱邮件 / Permanently delete a Trash message
+
+永久删除当前用户垃圾箱中的邮件、原文、正文和附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok: true }
+- 注意：只有已经位于垃圾箱的邮件可以永久删除。
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/messages/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/messages/{messageId}/attachments/{attachmentId}
+
+下载或预览附件 / Download or preview an attachment
+
+读取当前用户邮件附件；preview=1 时使用受限内联响应。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · messageId, attachmentId; Query · preview=1?
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/messages/message_id/attachments/attachment_id?preview=1" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "attachment.bin"
+```
+
+### GET /api/messages/{id}/raw
+
+下载原始 EML / Download raw EML
+
+下载当前用户邮件的原始 RFC 822 内容。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · message/rfc822
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/messages/resource_id/raw" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "message.eml"
+```
+
+### POST /api/messages/{id}/reply
+
+回复邮件 / Reply to a message
+
+在线程内回复；可使用 JSON，带附件时改用 multipart/form-data。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · text, idempotencyKey; or multipart · text, idempotencyKey, attachments[]
+- 响应：200/202 · { message }
+- 注意：需要回信权限；最多 5 个附件，单个 5 MiB、合计 10 MiB。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/messages/resource_id/reply" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "text": "Thanks!",
+  "idempotencyKey": "reply_12345678"
+}'
+```
+
+### POST /api/messages/{id}/translation
+
+翻译邮件正文 / Translate message content
+
+使用 Workers AI 翻译正文并缓存翻译结果。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · targetLanguage, sourceLanguage?
+- 响应：200 · { translation }
+- 注意：账户必须由管理员启用翻译权限。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/messages/resource_id/translation" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "targetLanguage": "en",
+  "sourceLanguage": "zh"
+}'
+```
+
+## 草稿与附件（Drafts and attachments）
+
+服务端草稿的创建、保存、附件和幂等发送。
+
+### GET /api/drafts
+
+列出草稿 / List drafts
+
+读取当前用户保留的服务端草稿摘要。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { drafts, limit }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/drafts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/drafts
+
+创建草稿 / Create a draft
+
+创建服务端草稿，超过角色上限时自动清理最早草稿。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · mailboxAddress, to, subject, text
+- 响应：200 · { draft }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/drafts" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "mailboxAddress": "owner@example.com",
+  "to": "friend@example.net",
+  "subject": "Draft subject",
+  "text": "Draft body"
+}'
+```
+
+### GET /api/drafts/{id}
+
+读取草稿详情 / Read a draft
+
+读取拥有的草稿及附件元数据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { draft }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/drafts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### PUT /api/drafts/{id}
+
+保存草稿 / Save a draft
+
+完整保存发件邮箱、收件人、主题和正文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · mailboxAddress, to, subject, text
+- 响应：200 · { draft }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/drafts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "mailboxAddress": "owner@example.com",
+  "to": "friend@example.net",
+  "subject": "Updated subject",
+  "text": "Updated body"
+}'
+```
+
+### DELETE /api/drafts/{id}
+
+丢弃草稿 / Discard a draft
+
+删除拥有的草稿及其全部附件对象。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/drafts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/drafts/{id}/attachments
+
+上传草稿附件 / Upload a draft attachment
+
+以 multipart/form-data 上传一个附件并计入用户存储配额。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：multipart/form-data · file
+- 响应：201 · { attachment }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/drafts/resource_id/attachments" \
+  --header "Authorization: Bearer om_at_..." \
+  --form "file=@./document.pdf"
+```
+
+### DELETE /api/drafts/{id}/attachments/{attachmentId}
+
+删除草稿附件 / Delete a draft attachment
+
+删除拥有的草稿附件并释放存储空间。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id, attachmentId
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/drafts/resource_id/attachments/attachment_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/drafts/{id}/send
+
+发送草稿 / Send a draft
+
+幂等发送草稿和附件，成功入队后删除草稿。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · idempotencyKey
+- 响应：200/202 · { message }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/drafts/resource_id/send" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "idempotencyKey": "draft_12345678"
+}'
+```
+
+## iCloud 隐藏邮箱（iCloud Hide My Email）
+
+iCloud 账号、凭据、隐藏地址和按需收件箱。
+
+### GET /api/icloud/accounts
+
+列出 iCloud 账户 / List iCloud accounts
+
+返回当前用户连接的 iCloud 账户，不解密或返回凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { accounts }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/icloud/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/icloud/accounts
+
+连接 iCloud 账户 / Connect an iCloud account
+
+通过应用专用密码连接主邮箱，或通过 Cookie 管理隐藏邮箱；两种方式可单独或同时配置。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · name, cookies?, host=icloud.com|icloud.com.cn, icloudEmail?, appPassword?
+- 响应：201 · { account }
+- 注意：Cookie 属于高敏感凭据，只应提交给自己的 OmniMail 实例。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/accounts" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "My iCloud",
+  "cookies": {
+    "X_APPLE_WEB_KB": "cookie-value"
+  },
+  "host": "icloud.com"
+}'
+```
+
+### PATCH /api/icloud/accounts/{id}
+
+修改 iCloud 账户备注 / Rename an iCloud account
+
+修改当前用户连接的 iCloud 账户备注名称。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name
+- 响应：200 · { ok: true, name }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal iCloud"
+}'
+```
+
+### DELETE /api/icloud/accounts/{id}
+
+删除 iCloud 账户 / Delete an iCloud account
+
+删除当前用户的加密 Cookie、应用专用密码和账户记录。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### PUT /api/icloud/accounts/{id}/cookies
+
+更新 iCloud Cookie / Update iCloud cookies
+
+覆盖并重新验证账户 Cookie，同时刷新别名统计。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · cookies
+- 响应：200 · { account }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/cookies" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "cookies": {
+    "X_APPLE_WEB_KB": "new-cookie-value"
+  }
+}'
+```
+
+### PUT /api/icloud/accounts/{id}/app-password
+
+设置 iCloud 应用专用密码 / Set an iCloud app-specific password
+
+验证 IMAP 登录后加密保存 iCloud 邮箱和应用专用密码。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · icloudEmail, appPassword
+- 响应：200 · { ok: true, icloudEmail }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/icloud/accounts/resource_id/app-password" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "icloudEmail": "owner@icloud.com",
+  "appPassword": "xxxx-xxxx-xxxx-xxxx"
+}'
+```
+
+### GET /api/icloud/aliases
+
+同步隐藏邮箱地址 / Sync Hide My Email aliases
+
+从 Apple 读取指定账户的全部隐藏邮箱地址并刷新 Cookie。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId
+- 响应：200 · { aliases }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/icloud/aliases?accountId=icloud_account_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/icloud/aliases/preview
+
+预览隐藏邮箱地址 / Preview a Hide My Email address
+
+让 Apple 生成一个尚未创建的候选隐藏邮箱地址。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · accountId
+- 响应：200 · { email, previewId }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/aliases/preview" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "accountId": "icloud_account_id"
+}'
+```
+
+### POST /api/icloud/aliases
+
+创建隐藏邮箱地址 / Create a Hide My Email alias
+
+在指定 iCloud 账户中创建带标签的隐藏地址。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · accountId, label?, email?, previewId?
+- 响应：201 · { alias }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/icloud/aliases" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "accountId": "icloud_account_id",
+  "label": "Shopping",
+  "email": "suggested@icloud.com",
+  "previewId": "00000000-0000-4000-8000-000000000001"
+}'
+```
+
+### PATCH /api/icloud/aliases/{anonymousId}
+
+停用或恢复隐藏地址 / Deactivate or reactivate an alias
+
+对指定 Apple anonymousId 执行停用或恢复。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · anonymousId; JSON · accountId, action=deactivate|reactivate
+- 响应：200 · { ok: true, action }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/icloud/aliases/alias_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "accountId": "icloud_account_id",
+  "action": "deactivate"
+}'
+```
+
+### DELETE /api/icloud/aliases/{anonymousId}
+
+永久删除隐藏地址 / Permanently delete an alias
+
+从 Apple 永久删除指定隐藏地址并刷新账户统计。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · anonymousId; JSON · accountId
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/icloud/aliases/alias_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "accountId": "icloud_account_id"
+}'
+```
+
+### GET /api/icloud/inbox
+
+读取 iCloud 最近来信 / List recent iCloud mail
+
+通过 IMAP 读取或搜索最近邮件摘要；Web 回退仅过滤当前摘要。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId, alias?, q?, limit=1..50?, days=0..365?
+- 响应：200 · { messages, method=imap|web }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/icloud/inbox?accountId=icloud_account_id&limit=20&days=7" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/icloud/inbox/{uid}
+
+读取 iCloud 邮件正文 / Read an iCloud message
+
+通过 IMAP UID 读取完整正文，并将未读邮件同步标记为 Seen。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · uid; Query · accountId
+- 响应：200 · { message: { …, isRead=true } }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/icloud/inbox/123?accountId=icloud_account_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+## Gmail 聚合收件箱（Gmail unified inbox）
+
+多账号凭据、受控 IMAP 同步、聚合索引、正文与附件。
+
+### GET /api/gmail/accounts
+
+列出 Gmail 账号 / List Gmail accounts
+
+返回当前用户的脱敏 Gmail 账号和同步状态，不返回凭据或密文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { enabled, accounts }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/gmail/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/gmail/accounts
+
+连接 Gmail 账号 / Connect a Gmail account
+
+验证固定 Gmail IMAP 端点后，用独立密钥加密保存应用专用密码。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · name, email, appPassword
+- 响应：201 · { account }
+- 注意：只接受 Google 生成的 16 位应用专用密码；不要提交 Google 账号主密码。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/gmail/accounts" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal Gmail",
+  "email": "owner@gmail.com",
+  "appPassword": "xxxx xxxx xxxx xxxx"
+}'
+```
+
+### PATCH /api/gmail/accounts/{id}
+
+重命名 Gmail 账号 / Rename a Gmail account
+
+修改当前用户 Gmail 账号的显示名称。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name
+- 响应：200 · { account }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/gmail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Work Gmail"
+}'
+```
+
+### PUT /api/gmail/accounts/{id}/app-password
+
+更新 Gmail 应用密码 / Update a Gmail app password
+
+先验证新密码，再替换密文；验证失败时保留原凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · appPassword
+- 响应：200 · { account }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/gmail/accounts/resource_id/app-password" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "appPassword": "xxxx xxxx xxxx xxxx"
+}'
+```
+
+### DELETE /api/gmail/accounts/{id}
+
+断开 Gmail 账号 / Disconnect a Gmail account
+
+级联删除本地凭据和元数据索引，不会撤销 Google 端应用密码。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, remoteRevocationRequired=true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/gmail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/gmail/accounts/{id}/verify
+
+验证 Gmail 连接 / Verify a Gmail connection
+
+使用已保存凭据重新执行只读 Gmail IMAP 登录与 EXAMINE。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, validatedAt }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/gmail/accounts/resource_id/verify" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/gmail/accounts/{id}/sync
+
+请求 Gmail 同步 / Request Gmail synchronization
+
+在频率限制和账号租约保护下，把只读同步任务加入 Queue。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · limit=10|20|50?
+- 响应：202 · { queued: true, limit }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/gmail/accounts/resource_id/sync" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "limit": 20
+}'
+```
+
+### GET /api/gmail/messages
+
+列出 Gmail 聚合邮件 / List unified Gmail messages
+
+按账号或全部账号搜索 D1 元数据索引，并使用稳定游标分页。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId?, q?, limit=1..50?, cursor?
+- 响应：200 · { messages, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/gmail/messages?limit=30" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/gmail/accounts/{accountId}/messages/{messageId}
+
+读取 Gmail 正文 / Read a Gmail message
+
+验证账号归属后，通过 BODY.PEEK[] 读取正文，并以受控 STORE 命令同步标记已读。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId
+- 响应：200 · { message }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/gmail/accounts/gmail_account_id/messages/message_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/gmail/accounts/{accountId}/messages/{messageId}/attachments/{partId}
+
+下载 Gmail 附件 / Download a Gmail attachment
+
+验证账号与邮件归属后，按需读取并转发不超过 5 MiB 的附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId, partId
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/gmail/accounts/gmail_account_id/messages/message_id/attachments/0" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "gmail-attachment.bin"
+```
+
+## Microsoft 邮箱（Microsoft Mail）
+
+OAuth2 认证、受控 IMAP 同步、正文、附件与精确已读写入。
+
+### GET /api/microsoft/accounts
+
+列出 Microsoft 账号 / List Microsoft accounts
+
+返回当前用户的脱敏账号与同步状态，不返回令牌、密码或密文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { enabled, accounts }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/microsoft/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/microsoft/accounts/import
+
+导入 Microsoft 账号 / Import Microsoft accounts
+
+逐项验证 1–25 个结构化 OAuth2 账号；可确认加密保存四字段组合密码，但不用于认证。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · accounts[1..25] · { name?, email, authMode=oauth2, refreshToken, clientId, authority?, password?, persistPasswordConfirmed? }
+- 响应：201/207 · { results: [{ index, status=accepted|duplicate|error, code?, error?, account? }] }
+- 注意：服务端只接受结构化字段；不要把整段逐行文本直接提交到该端点。
+- 注意：password 仅作为可选组合密码留存；提交时 persistPasswordConfirmed 必须为 true，且该密码永不参与认证。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/microsoft/accounts/import" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "accounts": [
+    {
+      "name": "Outlook",
+      "email": "owner@outlook.com",
+      "authMode": "oauth2",
+      "refreshToken": "refresh-token",
+      "clientId": "00000000-0000-4000-8000-000000000000",
+      "authority": "common"
+    }
+  ]
+}'
+```
+
+### PATCH /api/microsoft/accounts/{id}
+
+重命名 Microsoft 账号 / Rename a Microsoft account
+
+修改当前用户账号的本地显示名称。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name
+- 响应：200 · { account }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/microsoft/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Work Outlook"
+}'
+```
+
+### PUT /api/microsoft/accounts/{id}/credential
+
+替换 Microsoft 凭据 / Replace a Microsoft credential
+
+验证成功后才替换 OAuth2 凭据；不允许切换为密码认证。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · authMode=oauth2, refreshToken, clientId, authority?
+- 响应：200 · { ok: true }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/microsoft/accounts/resource_id/credential" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "authMode": "oauth2",
+  "refreshToken": "replacement-refresh-token",
+  "clientId": "00000000-0000-4000-8000-000000000000",
+  "authority": "common"
+}'
+```
+
+### DELETE /api/microsoft/accounts/{id}
+
+断开 Microsoft 账号 / Disconnect a Microsoft account
+
+级联删除本地密文、文件夹和元数据索引，不删除远端邮件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, remoteRevocationRequired }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/microsoft/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/microsoft/accounts/{id}/verify
+
+验证 Microsoft 连接 / Verify a Microsoft connection
+
+用已保存凭据验证固定 Microsoft IMAP 端点并刷新文件夹缓存。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, validatedAt }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/microsoft/accounts/resource_id/verify" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/microsoft/accounts/{id}/sync
+
+请求 Microsoft 同步 / Request Microsoft synchronization
+
+在冷却和账号租约保护下，将 INBOX 只读同步加入 Queue。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：202 · { queued: true }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/microsoft/accounts/resource_id/sync" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/microsoft/accounts/{id}/folders
+
+列出 Microsoft 文件夹 / List Microsoft folders
+
+读取缓存文件夹；refresh=1 时先从 IMAP LIST 安全刷新。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; Query · refresh=0|1?
+- 响应：200 · { folders }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/microsoft/accounts/resource_id/folders?refresh=1" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/microsoft/messages
+
+列出 Microsoft 邮件 / List Microsoft messages
+
+按账号与服务器返回的文件夹读取本地元数据，支持搜索、1–200 条和游标分页。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId?, folder?, q?, limit=1..200?, cursor?, refresh=0|1?
+- 响应：200 · { messages, page, folderPath }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/microsoft/messages?accountId=microsoft_account_id&folder=INBOX&limit=50" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/microsoft/accounts/{accountId}/messages/{messageId}
+
+读取 Microsoft 正文 / Read a Microsoft message
+
+再次校验用户、账号、文件夹与 UIDVALIDITY 后，通过 BODY.PEEK[] 按需读取 MIME 正文，并对未读邮件精确写入 \Seen。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId
+- 响应：200 · { message }
+- 注意：已读写入失败不会阻断正文响应；移动、删除、归档、星标和其他 flags 写入均未开放。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/microsoft/accounts/microsoft_account_id/messages/message_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/microsoft/accounts/{accountId}/messages/{messageId}/attachments/{partId}
+
+下载 Microsoft 附件 / Download a Microsoft attachment
+
+校验归属后按需读取并返回不超过 5 MiB 的附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId, partId
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/microsoft/accounts/microsoft_account_id/messages/message_id/attachments/0" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "microsoft-attachment.bin"
+```
+
+## QQ 邮箱（QQ Mail）
+
+授权码认证、有限 INBOX 索引、按需正文、精确已读与受控 SMTP 发信。
+
+### GET /api/qq-mail/accounts
+
+列出 QQ 邮箱账号 / List QQ Mail accounts
+
+返回当前用户的脱敏账号与同步状态，不返回授权码或密文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { enabled, accounts }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/qq-mail/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/qq-mail/accounts
+
+连接 QQ 邮箱账号 / Connect a QQ Mail account
+
+验证个人 @qq.com 邮箱的授权码后，用独立密钥加密保存并请求首次同步。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · name, email, authorizationCode
+- 响应：201 · { account }
+- 注意：authorizationCode 必须是 QQ 邮箱生成的授权码，不是 QQ 登录密码。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/qq-mail/accounts" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal QQ Mail",
+  "email": "123456789@qq.com",
+  "authorizationCode": "qq-mail-authorization-code"
+}'
+```
+
+### PATCH /api/qq-mail/accounts/{id}
+
+重命名 QQ 邮箱账号 / Rename a QQ Mail account
+
+修改当前用户 QQ 邮箱账号的本地显示名称。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name
+- 响应：200 · { account }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal QQ"
+}'
+```
+
+### PUT /api/qq-mail/accounts/{id}/authorization-code
+
+更新 QQ 邮箱授权码 / Update a QQ Mail authorization code
+
+先验证新授权码，再替换密文；验证失败时保留原凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · authorizationCode
+- 响应：200 · { account }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id/authorization-code" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "authorizationCode": "replacement-authorization-code"
+}'
+```
+
+### DELETE /api/qq-mail/accounts/{id}
+
+断开 QQ 邮箱账号 / Disconnect a QQ Mail account
+
+级联删除本地密文和元数据索引，不删除远端邮件或代为撤销授权码。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, remoteRevocationRequired=true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/qq-mail/accounts/{id}/verify
+
+验证 QQ 邮箱连接 / Verify a QQ Mail connection
+
+使用已保存授权码重新执行只读 QQ IMAP 登录与 EXAMINE。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, validatedAt }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id/verify" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/qq-mail/accounts/{id}/sync
+
+请求 QQ 邮箱同步 / Request QQ Mail synchronization
+
+在频率限制和账号租约保护下，把有限 INBOX 同步任务加入 Queue。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · limit=10|20|50?
+- 响应：202 · { queued: true, limit }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id/sync" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "limit": 20
+}'
+```
+
+### POST /api/qq-mail/accounts/{id}/identities
+
+添加 QQ 邮箱发信身份 / Add a QQ Mail sender identity
+
+使用账号现有授权码验证候选地址可登录固定 QQ SMTP 后，保存为可选发信身份。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name, email
+- 响应：201 · { account }
+- 注意：只接受 @qq.com、@foxmail.com 与 @vip.qq.com；验证过程不会发送测试邮件。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id/identities" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Foxmail address",
+  "email": "name@foxmail.com"
+}'
+```
+
+### DELETE /api/qq-mail/accounts/{id}/identities/{identityId}
+
+删除 QQ 邮箱发信身份 / Delete a QQ Mail sender identity
+
+删除当前账号的非主发信身份，不影响共享 INBOX、远端邮箱或主身份。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id, identityId
+- 响应：200 · { account }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id/identities/:identityId" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/qq-mail/messages
+
+列出 QQ 邮箱聚合邮件 / List unified QQ Mail messages
+
+按账号或全部账号搜索 D1 元数据索引，并使用稳定游标分页。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId?, q?, limit=1..50?, cursor?
+- 响应：200 · { messages, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/qq-mail/messages?limit=30" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/qq-mail/accounts/{id}/messages
+
+发送或回复 QQ 邮件 / Send or reply with QQ Mail
+
+从当前用户已连接的 QQ 地址，通过固定官方 SMTP 端点异步发送单收件人邮件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · sender?, to, subject, text, idempotencyKey, replyToMessageId?
+- 响应：202 · { message: { id, status=processing } }
+- 注意：replyToMessageId 存在时，服务端从原邮件推导收件人、主题和线程头，忽略客户端伪造值。
+- 注意：sender 必须是该账号中已通过 QQ SMTP 验证的身份；省略时使用主身份。
+- 注意：DATA 提交后的超时或断连会标记为投递结果不确定，不会自动重发。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/qq-mail/accounts/resource_id/messages" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "to": "recipient@example.com",
+  "subject": "Hello",
+  "text": "Message body",
+  "idempotencyKey": "request_12345678"
+}'
+```
+
+### GET /api/qq-mail/accounts/{accountId}/messages/{messageId}
+
+读取 QQ 邮箱正文 / Read a QQ Mail message
+
+重新校验归属与 UIDVALIDITY，通过 BODY.PEEK[] 按需读取正文，并独立尝试写入 Seen。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId
+- 响应：200 · { message }
+- 注意：已读写入失败不会阻断正文响应；移动、删除、归档、星标和其他远端写入均未开放。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/qq-mail/accounts/qq_mail_account_id/messages/message_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/qq-mail/accounts/{accountId}/messages/{messageId}/attachments/{partId}
+
+下载 QQ 邮箱附件 / Download a QQ Mail attachment
+
+校验归属后按需读取并返回不超过 5 MiB 的附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId, partId
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/qq-mail/accounts/qq_mail_account_id/messages/message_id/attachments/0" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "qq-mail-attachment.bin"
+```
+
+## NAVER 邮箱（NAVER Mail）
+
+应用专用密码认证、有限 INBOX 索引、按需正文、附件与精确已读。
+
+### GET /api/naver-mail/accounts
+
+列出 NAVER 邮箱账号 / List NAVER Mail accounts
+
+返回当前用户的脱敏账号与同步状态，不返回应用专用密码或密文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { enabled, accounts }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/naver-mail/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/naver-mail/accounts
+
+连接 NAVER 邮箱账号 / Connect a NAVER Mail account
+
+验证个人 @naver.com 邮箱的应用专用密码后，加密保存并请求首次同步。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · name, email, appPassword
+- 响应：201 · { account }
+- 注意：appPassword 必须由 NAVER 两步验证生成，不能提交 NAVER 登录密码。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/naver-mail/accounts" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal NAVER Mail",
+  "email": "owner@naver.com",
+  "appPassword": "naver-app-password"
+}'
+```
+
+### PATCH /api/naver-mail/accounts/{id}
+
+重命名 NAVER 邮箱账号 / Rename a NAVER Mail account
+
+修改当前用户 NAVER 邮箱账号的本地显示名称。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name
+- 响应：200 · { account }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/naver-mail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal NAVER"
+}'
+```
+
+### PUT /api/naver-mail/accounts/{id}/app-password
+
+更新 NAVER 应用专用密码 / Update a NAVER app-specific password
+
+先验证新密码，再替换密文；验证失败时保留原凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · appPassword
+- 响应：200 · { account }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/naver-mail/accounts/resource_id/app-password" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "appPassword": "replacement-app-password"
+}'
+```
+
+### DELETE /api/naver-mail/accounts/{id}
+
+断开 NAVER 邮箱账号 / Disconnect a NAVER Mail account
+
+级联删除本地密文和元数据索引，不删除远端邮件或代为撤销应用密码。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, remoteRevocationRequired=true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/naver-mail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/naver-mail/accounts/{id}/verify
+
+验证 NAVER 邮箱连接 / Verify a NAVER Mail connection
+
+使用已保存凭据重新执行只读 NAVER IMAP 登录与 EXAMINE。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, validatedAt }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/naver-mail/accounts/resource_id/verify" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/naver-mail/accounts/{id}/sync
+
+请求 NAVER 邮箱同步 / Request NAVER Mail synchronization
+
+在频率限制和账号租约保护下，把有限 INBOX 同步任务加入 Queue。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：202 · { queued: true }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/naver-mail/accounts/resource_id/sync" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/naver-mail/messages
+
+列出 NAVER 聚合邮件 / List unified NAVER Mail messages
+
+按账号或全部账号搜索 D1 元数据索引，并使用稳定游标分页。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId?, q?, limit=1..50?, cursor?
+- 响应：200 · { messages, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/naver-mail/messages?limit=30" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/naver-mail/accounts/{accountId}/messages/{messageId}
+
+读取 NAVER 邮箱正文 / Read a NAVER Mail message
+
+校验归属与 UIDVALIDITY，通过 BODY.PEEK[] 按需读取正文，并独立尝试写入 Seen。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId
+- 响应：200 · { message }
+- 注意：已读写入失败不会阻断正文；不开放移动、删除、归档、星标或发信。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/naver-mail/accounts/naver_mail_account_id/messages/message_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/naver-mail/accounts/{accountId}/messages/{messageId}/attachments/{partId}
+
+下载 NAVER 邮箱附件 / Download a NAVER Mail attachment
+
+校验归属后按需读取并返回不超过 5 MiB 的附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId, partId
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/naver-mail/accounts/naver_mail_account_id/messages/message_id/attachments/0" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "naver-mail-attachment.bin"
+```
+
+## Yandex 邮箱（Yandex Mail）
+
+Mail 应用密码认证、有限 INBOX 索引、按需正文、附件与精确已读。
+
+### GET /api/yandex-mail/accounts
+
+列出 Yandex 邮箱账号 / List Yandex Mail accounts
+
+返回当前用户的脱敏账号与同步状态，不返回应用专用密码或密文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { enabled, accounts }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/yandex-mail/accounts" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/yandex-mail/accounts
+
+连接 Yandex 邮箱账号 / Connect a Yandex Mail account
+
+验证个人 @yandex.com 邮箱的应用专用密码后，加密保存并请求首次同步。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · name, email, appPassword
+- 响应：201 · { account }
+- 注意：appPassword 必须是 Yandex ID 中为“邮件”创建的应用密码，不能提交 Yandex 登录密码。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/yandex-mail/accounts" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal Yandex Mail",
+  "email": "owner@yandex.com",
+  "appPassword": "yandex-app-password"
+}'
+```
+
+### PATCH /api/yandex-mail/accounts/{id}
+
+重命名 Yandex 邮箱账号 / Rename a Yandex Mail account
+
+修改当前用户 Yandex 邮箱账号的本地显示名称。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · name
+- 响应：200 · { account }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/yandex-mail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "Personal Yandex"
+}'
+```
+
+### PUT /api/yandex-mail/accounts/{id}/app-password
+
+更新 Yandex 应用专用密码 / Update a Yandex app-specific password
+
+先验证新密码，再替换密文；验证失败时保留原凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id; JSON · appPassword
+- 响应：200 · { account }
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/yandex-mail/accounts/resource_id/app-password" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "appPassword": "replacement-app-password"
+}'
+```
+
+### DELETE /api/yandex-mail/accounts/{id}
+
+断开 Yandex 邮箱账号 / Disconnect a Yandex Mail account
+
+级联删除本地密文和元数据索引，不删除远端邮件或代为撤销应用密码。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, remoteRevocationRequired=true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/yandex-mail/accounts/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/yandex-mail/accounts/{id}/verify
+
+验证 Yandex 邮箱连接 / Verify a Yandex Mail connection
+
+使用已保存凭据重新执行只读 Yandex IMAP 登录与 EXAMINE。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { ok, validatedAt }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/yandex-mail/accounts/resource_id/verify" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/yandex-mail/accounts/{id}/sync
+
+请求 Yandex 邮箱同步 / Request Yandex Mail synchronization
+
+在频率限制和账号租约保护下，把有限 INBOX 同步任务加入 Queue。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：202 · { queued: true }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/yandex-mail/accounts/resource_id/sync" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/yandex-mail/messages
+
+列出 Yandex 聚合邮件 / List unified Yandex Mail messages
+
+按账号或全部账号搜索 D1 元数据索引，并使用稳定游标分页。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · accountId?, q?, limit=1..50?, cursor?
+- 响应：200 · { messages, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/yandex-mail/messages?limit=30" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/yandex-mail/accounts/{accountId}/messages/{messageId}
+
+读取 Yandex 邮箱正文 / Read a Yandex Mail message
+
+校验归属与 UIDVALIDITY，通过 BODY.PEEK[] 按需读取正文，并独立尝试写入 Seen。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId
+- 响应：200 · { message }
+- 注意：已读写入失败不会阻断正文；不开放移动、删除、归档、星标或发信。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/yandex-mail/accounts/yandex_mail_account_id/messages/message_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/yandex-mail/accounts/{accountId}/messages/{messageId}/attachments/{partId}
+
+下载 Yandex 邮箱附件 / Download a Yandex Mail attachment
+
+校验归属后按需读取并返回不超过 5 MiB 的附件。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · accountId, messageId, partId
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/yandex-mail/accounts/yandex_mail_account_id/messages/message_id/attachments/0" \
+  --header "Authorization: Bearer om_at_..." \
+  --output "yandex-mail-attachment.bin"
+```
+
+## Linux DO 邮箱（Linux DO Mail）
+
+加密连接 Linux DO Mail，按需读取 INBOX 并通过官方 SMTP 发件。
+
+### GET /api/linux-do-mail/account
+
+读取 Linux DO Mail 连接 / Read the Linux DO Mail connection
+
+返回功能状态和当前用户的脱敏账号信息，不返回密码或认证令牌。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { enabled, account }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/linux-do-mail/account" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/linux-do-mail/account
+
+连接 Linux DO Mail / Connect Linux DO Mail
+
+使用完整邮箱用户名和密码或认证令牌验证 IMAP，再加密保存凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · username, password
+- 响应：201 · { account }
+- 注意：官方建议使用可撤销的专用认证令牌，不要提交邮箱主密码。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/linux-do-mail/account" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "username": "member@linux.do",
+  "password": "authentication-token"
+}'
+```
+
+### DELETE /api/linux-do-mail/account
+
+断开 Linux DO Mail / Disconnect Linux DO Mail
+
+删除当前用户的账号记录和凭据密文，不修改服务器端邮箱。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/linux-do-mail/account" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### POST /api/linux-do-mail/account/verify
+
+验证 Linux DO Mail 凭据 / Verify Linux DO Mail credentials
+
+重新登录 IMAP 并执行只读 EXAMINE INBOX。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：No parameters
+- 响应：200 · { ok: true, validatedAt }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/linux-do-mail/account/verify" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### PUT /api/linux-do-mail/account/credential
+
+更新 Linux DO Mail 凭据 / Update the Linux DO Mail credential
+
+先验证新密码或认证令牌，再替换已保存的密文；验证失败时保留原凭据。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · password
+- 响应：200 · { account }
+- 注意：响应不会包含新旧凭据。
+
+```bash
+curl --request PUT \
+  --url "https://mail.example.com/api/linux-do-mail/account/credential" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "password": "new-authentication-token"
+}'
+```
+
+### POST /api/linux-do-mail/messages
+
+发送 Linux DO Mail 邮件 / Send a Linux DO Mail message
+
+使用已连接账号通过 SMTP 465 异步发送邮件，并复用 OmniMail 的幂等、限速、队列和失败保护。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：JSON · to, subject, text, idempotencyKey
+- 响应：200/202 · { message }
+- 注意：From 固定为当前已验证的 Linux DO Mail 地址，不能由请求覆盖。
+- 注意：当前额外执行每日 50 封硬上限；相同 idempotencyKey 不会重复入队。
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/linux-do-mail/messages" \
+  --header "Authorization: Bearer om_at_..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "to": "recipient@example.net",
+  "subject": "Hello",
+  "text": "Message body",
+  "idempotencyKey": "request_12345678"
+}'
+```
+
+### GET /api/linux-do-mail/inbox
+
+读取 Linux DO Mail 最近来信 / List recent Linux DO Mail messages
+
+通过 IMAP 读取 INBOX 最近 20 封邮件，或在服务器上搜索主题、联系人与正文。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · q?
+- 响应：200 · { messages }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/linux-do-mail/inbox?q=release" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/linux-do-mail/inbox/{uid}
+
+读取 Linux DO Mail 正文 / Read a Linux DO Mail message
+
+通过数字 IMAP UID 获取受大小限制的邮件正文，并尝试同步标记已读。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · uid
+- 响应：200 · { message }
+- 注意：已读写入失败不阻断正文响应；响应中的 isRead 表示服务器状态或本次成功写入的结果。
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/linux-do-mail/inbox/123" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/linux-do-mail/sent
+
+读取 Linux DO Mail 发件记录 / List sent Linux DO Mail messages
+
+读取或搜索当前账号最近 20 条 OmniMail 发件记录及排队、成功或失败状态。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Query · q?
+- 响应：200 · { messages }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/linux-do-mail/sent?q=invoice" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+### GET /api/linux-do-mail/sent/{id}
+
+读取 Linux DO Mail 发件正文 / Read a sent Linux DO Mail message
+
+从受当前用户约束的 D1 和 R2 记录读取发件正文与投递状态。
+
+- 权限：登录用户（Session Cookie 或 Bearer Access Token）
+- 请求：Path · id
+- 响应：200 · { message }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/linux-do-mail/sent/resource_id" \
+  --header "Authorization: Bearer om_at_..."
+```
+
+## 管理员：运营与邮件（Admin: operations and mail）
+
+统计、审计、失败邮件、全站邮件和安全清理。
+
+### GET /api/admin/audit-logs
+
+查询操作日志 / Query audit logs
+
+按时间、类别和关键词查询脱敏审计记录并游标分页。
+
+- 权限：管理员或主管理员
+- 请求：Query · days?, category=all|auth|account|user|mailbox|domain|invitation|message|icloud|gmail|microsoft|qq-mail|linuxdo-mail|system?, q?, limit?, cursor?
+- 响应：200 · { logs, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/audit-logs?days=7&category=qq-mail&limit=50" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### GET /api/admin/statistics
+
+读取全站统计 / Read site-wide statistics
+
+返回收件趋势、来源、发件人、平台用量和存储汇总。
+
+- 权限：管理员或主管理员
+- 请求：Query · days=7|30|90?
+- 响应：200 · { summary, daily, sourceDomains, topSenders, platform, storage }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/statistics?days=30" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### GET /api/admin/deployment-check
+
+执行部署自检 / Run deployment checks
+
+检查 D1、R2、队列、Secret 和功能配置，不返回 Secret 明文。
+
+- 权限：管理员或主管理员
+- 请求：No parameters
+- 响应：200 · { groups, ready }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/deployment-check" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### GET /api/admin/failed-messages
+
+列出解析失败邮件 / List failed messages
+
+返回仍可重试或需要清理的失败邮件摘要。
+
+- 权限：管理员或主管理员
+- 请求：No parameters
+- 响应：200 · { total, messages }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/failed-messages" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/admin/failed-messages/{id}/retry
+
+重试失败邮件 / Retry a failed message
+
+把指定失败邮件重新加入解析队列。
+
+- 权限：管理员或主管理员
+- 请求：Path · id
+- 响应：200 · { ok: true }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/failed-messages/resource_id/retry" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### GET /api/admin/mail-cleanup/preview
+
+预估邮件清理 / Preview mail cleanup
+
+按范围、类别和邮件年龄计算待清理数量、附件和空间。
+
+- 权限：管理员或主管理员
+- 请求：Query · scope=all|user|mailbox, scopeValue?, category, olderThanDays=1..3650
+- 响应：200 · { filter, preview, batchLimit }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/mail-cleanup/preview?scope=all&category=trash&olderThanDays=30" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/admin/mail-cleanup
+
+执行邮件清理 / Run mail cleanup
+
+经数量复核后每批永久清理最多 50 封匹配邮件。
+
+- 权限：管理员或主管理员
+- 请求：JSON · scope, scopeValue?, category, olderThanDays, expectedCount, confirm=true
+- 响应：200 · { deletedCount, deletedBytes, remainingCount }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/mail-cleanup" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "scope": "all",
+  "scopeValue": "",
+  "category": "trash",
+  "olderThanDays": 30,
+  "expectedCount": 12,
+  "confirm": true
+}'
+```
+
+### GET /api/admin/messages
+
+查询全站邮件 / Query site-wide messages
+
+主管理员按用户、邮箱、方向、文件夹、状态和时间筛选全站邮件。
+
+- 权限：仅主管理员
+- 请求：Query · q?, user?, mailbox?, direction?, folder?, status?, days?, limit?, cursor?
+- 响应：200 · { messages, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/messages?folder=inbox&days=30&limit=30" \
+  --header "Authorization: Bearer om_at_owner..."
+```
+
+### PATCH /api/admin/messages/bulk
+
+批量管理全站邮件 / Bulk-manage site-wide messages
+
+主管理员跨用户批量移入垃圾箱、恢复或永久删除邮件。
+
+- 权限：仅主管理员
+- 请求：JSON · ids[1..50], action=trash|restore|delete
+- 响应：200 · { ok, updatedCount }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/messages/bulk" \
+  --header "Authorization: Bearer om_at_owner..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "ids": [
+    "message_1",
+    "message_2"
+  ],
+  "action": "trash"
+}'
+```
+
+### GET /api/admin/messages/{messageId}/attachments/{attachmentId}
+
+读取任意用户附件 / Read any user attachment
+
+主管理员下载或受限预览全站邮件附件，并写入审计日志。
+
+- 权限：仅主管理员
+- 请求：Path · messageId, attachmentId; Query · preview=1?
+- 响应：200 · attachment bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/messages/message_id/attachments/attachment_id?preview=1" \
+  --header "Authorization: Bearer om_at_owner..." \
+  --output "attachment.bin"
+```
+
+### GET /api/admin/messages/{id}/raw
+
+下载任意用户原始邮件 / Download any raw message
+
+主管理员下载全站邮件的原始 EML，并记录访问审计。
+
+- 权限：仅主管理员
+- 请求：Path · id
+- 响应：200 · message/rfc822
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/messages/resource_id/raw" \
+  --header "Authorization: Bearer om_at_owner..." \
+  --output "message.eml"
+```
+
+### GET /api/admin/messages/{id}
+
+读取任意用户邮件详情 / Read any message details
+
+主管理员读取全站邮件正文、所属用户、线程和附件元数据。
+
+- 权限：仅主管理员
+- 请求：Path · id
+- 响应：200 · { message, thread }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/messages/resource_id" \
+  --header "Authorization: Bearer om_at_owner..."
+```
+
+## 管理员：用户与访问（Admin: users and access）
+
+邀请、用户、用户限速和收件域名管理。
+
+### GET /api/admin/invites
+
+查询邀请记录 / Query invitations
+
+分页读取管理员创建的邀请、使用次数、状态和权限策略。
+
+- 权限：管理员或主管理员
+- 请求：Query · limit?, cursor?
+- 响应：200 · { invites, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/invites?limit=30" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/admin/invites
+
+创建账户邀请 / Create an account invitation
+
+创建单次或多次、指定地址或自选地址的用户邀请。
+
+- 权限：管理员或主管理员
+- 请求：JSON · domain, accountRole, expiresInHours, accountLifetimeHours?, multiUse, addressMode, assignedLocalPart?, mailboxLimit, canCreateMailboxes, canReply, canTranslate
+- 响应：201 · { invite, token }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/invites" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "domain": "example.com",
+  "accountRole": "user",
+  "expiresInHours": 24,
+  "accountLifetimeHours": 0,
+  "multiUse": false,
+  "addressMode": "self_selected",
+  "assignedLocalPart": "",
+  "mailboxLimit": 1,
+  "canCreateMailboxes": true,
+  "canReply": false,
+  "canTranslate": false
+}'
+```
+
+### PATCH /api/admin/invites/{id}/revoke
+
+撤销邀请 / Revoke an invitation
+
+立即使指定邀请失效，不影响已创建的账户。
+
+- 权限：管理员或主管理员
+- 请求：Path · id
+- 响应：200 · { ok: true }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/invites/resource_id/revoke" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### GET /api/admin/users
+
+查询用户目录 / Query the user directory
+
+分页读取用户、邮箱数量、配额与发信用量。
+
+- 权限：管理员或主管理员
+- 请求：Query · limit?, cursor?
+- 响应：200 · { users, totals, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/users?limit=50" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/admin/users
+
+创建托管用户 / Create a managed user
+
+由管理员直接创建账户并设置角色、配额和功能权限。
+
+- 权限：管理员或主管理员
+- 请求：JSON · email, displayName, password, role?, status?, mailboxLimit?, storageQuotaMiB?, canCreateMailboxes?, canReply?, canTranslate?
+- 响应：201 · { user }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/users" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "email": "member@example.com",
+  "displayName": "Member",
+  "password": "strong-password",
+  "role": "user",
+  "status": "active",
+  "mailboxLimit": 1,
+  "storageQuotaMiB": 1024,
+  "canCreateMailboxes": true,
+  "canReply": false,
+  "canTranslate": false
+}'
+```
+
+### PATCH /api/admin/users/{id}
+
+更新用户策略 / Update a user policy
+
+修改非主管理员用户的角色、状态、邮箱上限、配额和能力。
+
+- 权限：管理员或主管理员
+- 请求：Path · id; JSON · role?, status?, mailboxLimit?, storageQuotaMiB?, canCreateMailboxes?, canReply?, canTranslate?
+- 响应：200 · { user }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/users/resource_id" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "status": "active",
+  "mailboxLimit": 3,
+  "canReply": true
+}'
+```
+
+### PATCH /api/admin/users/{id}/outbound-rate-limit
+
+覆盖用户发信限速 / Override a user sending limit
+
+为指定用户设置每分钟和每日限额；null 表示继承全局值。
+
+- 权限：管理员或主管理员
+- 请求：Path · id; JSON · minuteLimit: number|null, dayLimit: number|null
+- 响应：200 · { outboundRateLimit }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/users/resource_id/outbound-rate-limit" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "minuteLimit": 5,
+  "dayLimit": 100
+}'
+```
+
+### POST /api/admin/users/{id}/outbound-rate-limit/reset
+
+清零用户发信计数 / Reset a user sending counter
+
+清零指定用户当前分钟和 UTC 自然日的发信计数。
+
+- 权限：管理员或主管理员
+- 请求：Path · id
+- 响应：200 · { outboundRateLimit }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/users/resource_id/outbound-rate-limit/reset" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### POST /api/admin/domains
+
+添加收件域名 / Add a receiving domain
+
+把已配置 Email Routing 的域名加入 OmniMail 管理。
+
+- 权限：管理员或主管理员
+- 请求：JSON · name
+- 响应：201 · { domain }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/domains" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "name": "example.com"
+}'
+```
+
+### PATCH /api/admin/domains/{name}
+
+启停收件域名 / Enable or disable a receiving domain
+
+修改域名启用状态，关闭后停止该域名地址的收件和发信。
+
+- 权限：管理员或主管理员
+- 请求：Path · name; JSON · isActive
+- 响应：200 · { domain }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/domains/example.com" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "isActive": false
+}'
+```
+
+### DELETE /api/admin/domains/{name}
+
+删除空域名 / Delete an empty domain
+
+删除没有邮箱地址的托管域名。
+
+- 权限：管理员或主管理员
+- 请求：Path · name
+- 响应：200 · { ok: true }
+
+```bash
+curl --request DELETE \
+  --url "https://mail.example.com/api/admin/domains/example.com" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+## 管理员：设置、备份与版本（Admin: settings, backups, and version）
+
+全局策略、存储、备份浏览和系统更新。
+
+### GET /api/admin/mail-credentials/migration
+
+读取邮箱密钥迁移进度 / Read mail key migration progress
+
+仅主管理员 Cookie 会话；只统计配置和迁移进度，不返回密钥、凭据或密文。
+
+- 权限：仅浏览器 Session Cookie
+- 请求：No parameters
+- 响应：200 · { globalKeyConfigured, globalKeyReady, keyId, total, migrated, pending, providers }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/mail-credentials/migration" \
+  --cookie "omnimail_session=..."
+```
+
+### POST /api/admin/mail-credentials/migration
+
+迁移一批邮箱凭据 / Migrate one batch of mail credentials
+
+仅主管理员 Cookie 会话；每次最多处理 10 个凭据字段。必须显式确认并提交当前 keyId；失败保留原数据，关闭页面后不再发起后续批次。
+
+- 权限：仅浏览器 Session Cookie
+- 请求：JSON · confirm: true, keyId, cursor?: { field, afterId } | null
+- 响应：200 · { cursor, scanned, migrated, failed, conflicts, status }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/mail-credentials/migration" \
+  --cookie "omnimail_session=..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "confirm": true,
+  "keyId": "0123456789abcdef0123456789abcdef",
+  "cursor": null
+}'
+```
+
+### PATCH /api/admin/settings/registration
+
+设置外部注册 / Configure public registration
+
+开启或关闭外部注册，并选择密码或 Linux DO 注册方式。
+
+- 权限：管理员或主管理员
+- 请求：JSON · enabled, method=password|linuxdo
+- 响应：200 · { registrationEnabled, registrationMethod }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/registration" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "enabled": true,
+  "method": "password"
+}'
+```
+
+### PATCH /api/admin/settings/registration-domains
+
+设置注册邮箱后缀 / Configure registration email domains
+
+配置最多 100 个允许或禁止注册的邮箱后缀。
+
+- 权限：管理员或主管理员
+- 请求：JSON · mode=blocklist|allowlist, domains[]
+- 响应：200 · { registrationDomainPolicy }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/registration-domains" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "mode": "blocklist",
+  "domains": [
+    "mailinator.com"
+  ]
+}'
+```
+
+### PATCH /api/admin/settings/mail-refresh
+
+设置自动刷新间隔 / Configure automatic refresh
+
+设置所有 Web 用户的收件箱轮询间隔。
+
+- 权限：管理员或主管理员
+- 请求：JSON · interval=0|5|10|30|60|120
+- 响应：200 · { mailRefreshInterval }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/mail-refresh" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "interval": 30
+}'
+```
+
+### PATCH /api/admin/settings/mail-workspaces
+
+设置邮箱功能入口 / Configure mailbox workspace entries
+
+控制各可选邮箱工作区是否显示在 OmniMail 导航中。
+
+- 权限：管理员或主管理员
+- 请求：JSON · iCloudWorkspaceEnabled, linuxDoMailWorkspaceEnabled, gmailWorkspaceEnabled, microsoftWorkspaceEnabled, qqMailWorkspaceEnabled, naverMailWorkspaceEnabled
+- 响应：200 · all workspace switches
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/mail-workspaces" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "iCloudWorkspaceEnabled": true,
+  "linuxDoMailWorkspaceEnabled": true,
+  "gmailWorkspaceEnabled": true,
+  "microsoftWorkspaceEnabled": true,
+  "qqMailWorkspaceEnabled": true,
+  "naverMailWorkspaceEnabled": false
+}'
+```
+
+### PATCH /api/admin/settings/remote-images
+
+设置远程图片策略 / Configure remote-image policy
+
+控制 HTML 邮件是否默认通过安全代理加载外部图片。
+
+- 权限：管理员或主管理员
+- 请求：JSON · enabled
+- 响应：200 · { remoteImagesEnabled }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/remote-images" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "enabled": false
+}'
+```
+
+### PATCH /api/admin/settings/unassigned-mail
+
+设置无人收件 / Configure unassigned mail
+
+控制未创建地址的来信是否进入主管理员收件箱。
+
+- 权限：管理员或主管理员
+- 请求：JSON · enabled
+- 响应：200 · { unassignedMailEnabled }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/unassigned-mail" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "enabled": true
+}'
+```
+
+### PATCH /api/admin/settings/official-extension
+
+启用官方浏览器扩展 / Enable the official browser extension
+
+允许固定 Chrome Web Store 扩展 ID 使用授权流程。
+
+- 权限：仅主管理员
+- 请求：JSON · enabled
+- 响应：200 · { officialExtensionEnabled }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/official-extension" \
+  --header "Authorization: Bearer om_at_owner..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "enabled": true
+}'
+```
+
+### PATCH /api/admin/settings/random-mailbox-prefix
+
+设置随机邮箱前缀 / Configure random mailbox prefix
+
+设置快速生成随机地址时使用的固定前缀。
+
+- 权限：管理员或主管理员
+- 请求：JSON · prefix
+- 响应：200 · { randomMailboxPrefix }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/random-mailbox-prefix" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "prefix": "omni-"
+}'
+```
+
+### GET /api/admin/settings/outbound-rate-limit
+
+读取全局发信限速 / Read global sending limits
+
+读取全局开关、每分钟和每日默认发信限额。
+
+- 权限：管理员或主管理员
+- 请求：No parameters
+- 响应：200 · { outboundRateLimit }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/settings/outbound-rate-limit" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### PATCH /api/admin/settings/outbound-rate-limit
+
+更新全局发信限速 / Update global sending limits
+
+设置是否启用限速以及全局每分钟、每日限额。
+
+- 权限：管理员或主管理员
+- 请求：JSON · enabled, minuteLimit=1..100, dayLimit=1..10000
+- 响应：200 · { outboundRateLimit }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/outbound-rate-limit" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "enabled": true,
+  "minuteLimit": 10,
+  "dayLimit": 200
+}'
+```
+
+### GET /api/admin/settings/storage
+
+读取存储与保留策略 / Read storage and retention policy
+
+读取备份、保留期、默认配额、草稿上限和最近备份状态。
+
+- 权限：管理员或主管理员
+- 请求：No parameters
+- 响应：200 · { storagePolicy }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/settings/storage" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### PATCH /api/admin/settings/storage
+
+更新存储与保留策略 / Update storage and retention policy
+
+更新备份开关、各类保留期、默认配额和分角色草稿上限。
+
+- 权限：管理员或主管理员
+- 请求：JSON · backupEnabled?, trashRetentionDays?, temporaryDataRetentionDays?, auditRetentionDays?, failedMessageRetentionDays?, defaultUserQuotaMiB?, defaultTemporaryQuotaMiB?, draftLimits?
+- 响应：200 · { storagePolicy }
+
+```bash
+curl --request PATCH \
+  --url "https://mail.example.com/api/admin/settings/storage" \
+  --header "Authorization: Bearer om_at_admin..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "backupEnabled": true,
+  "trashRetentionDays": 30,
+  "temporaryDataRetentionDays": 7,
+  "auditRetentionDays": 180,
+  "failedMessageRetentionDays": 7,
+  "defaultUserQuotaMiB": 1024,
+  "defaultTemporaryQuotaMiB": 256,
+  "draftLimits": {
+    "superAdmin": 5,
+    "admin": 5,
+    "user": 5,
+    "temporary": 3
+  }
+}'
+```
+
+### POST /api/admin/backups
+
+启动手动备份 / Start a manual backup
+
+启动一次 D1 与邮件归档备份 Workflow。
+
+- 权限：管理员或主管理员
+- 请求：No body
+- 响应：202 · { id }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/backups" \
+  --header "Authorization: Bearer om_at_admin..."
+```
+
+### GET /api/admin/backups/objects
+
+浏览备份对象 / Browse backup objects
+
+主管理员按前缀和游标浏览 BACKUP_BUCKET 对象。
+
+- 权限：仅主管理员
+- 请求：Query · prefix?, limit?, cursor?
+- 响应：200 · { objects, page }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/backups/objects?prefix=d1%2Fdaily%2F&limit=30" \
+  --header "Authorization: Bearer om_at_owner..."
+```
+
+### GET /api/admin/backups/download
+
+下载备份对象 / Download a backup object
+
+主管理员下载经过安全路径校验的指定备份对象。
+
+- 权限：仅主管理员
+- 请求：Query · key
+- 响应：200 · backup bytes
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/backups/download?key=d1%2Fdaily%2Fbackup.sql" \
+  --header "Authorization: Bearer om_at_owner..." \
+  --output "backup.sql"
+```
+
+### POST /api/admin/backups/drill
+
+执行备份结构演练 / Run a backup structure drill
+
+只读解析指定备份并校验结构，不导入或覆盖生产数据。
+
+- 权限：仅主管理员
+- 请求：JSON · key
+- 响应：200 · { result }
+
+```bash
+curl --request POST \
+  --url "https://mail.example.com/api/admin/backups/drill" \
+  --header "Authorization: Bearer om_at_owner..." \
+  --header "Content-Type: application/json" \
+  --data '{
+  "key": "d1/daily/backup.sql"
+}'
+```
+
+### GET /api/admin/version
+
+检查系统版本 / Check the system version
+
+读取当前版本与最新 GitHub Release，供管理员手动同步 Fork。
+
+- 权限：管理员或主管理员
+- 请求：No parameters
+- 响应：200 · { currentVersion, latestVersion, updateAvailable, releaseUrl }
+
+```bash
+curl --request GET \
+  --url "https://mail.example.com/api/admin/version" \
+  --header "Authorization: Bearer om_at_admin..."
+```

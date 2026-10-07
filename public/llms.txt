@@ -1,0 +1,273 @@
+# OmniMail API
+
+> OmniMail 是部署在 Cloudflare Workers 上的自托管多域名 Webmail。本文档面向 AI 与自动化工具，说明如何认证并调用当前实例的 HTTP API。
+
+- 基础地址：本文件所在站点的源地址 + `/api`。例如文件位于 `https://mail.example.com/llms.txt`，接口就是 `https://mail.example.com/api/...`。
+- 接口总数：178。请求与响应均为 JSON（附件与原文下载除外），错误统一返回 `{ "error": "说明" }`。
+- 路径中的 `{address}`、`{id}` 等是路径参数，需要 URL 编码，例如 `owner%40example.com`。
+- 当前未带版本前缀的 `/api/*` 主要服务于同仓库客户端，字段可能随版本增加，读取时请忽略未知字段。
+
+## 认证
+
+1. `POST /api/auth/token`，JSON `{ "email", "password", "deviceName", "mfaCode"? }`，返回 `accessToken`（15 分钟）和 `refreshToken`（30 天）。令牌明文只返回一次。
+2. 之后每个请求带上 `Authorization: Bearer <accessToken>`。
+3. Access Token 过期后，用 `POST /api/auth/token/refresh`，JSON `{ "refreshToken" }` 同时轮换两个令牌。
+4. 浏览器扩展、Android 等受限设备令牌只能访问其 Scope 允许的接口，越权返回 403。
+5. 速率受限时返回 429；D1 日额度耗尽等服务暂停时返回 503，可按响应提示稍后重试。
+
+## 系统与公开入口（System and public entry points）
+
+健康检查、初始化、注册、邀请落地、代理与 Webhook。
+
+- `GET /api/health`：服务健康检查。权限：公开，无需登录。
+- `GET /api/config`：读取公开运行配置。权限：公开，无需登录。
+- `POST /api/setup`：首次初始化主管理员。权限：公开，无需登录。
+- `POST /api/register`：外部注册普通账户。权限：公开，无需登录。
+- `GET /api/invitations/{token}`：预览邀请链接。权限：公开，无需登录。
+- `POST /api/invitations/{token}`：接受邀请并创建账户。权限：公开，无需登录。
+- `GET /api/remote-images`：代理安全远程图片。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/webhooks/resend`：接收 Resend 投递事件。权限：Webhook 签名验证。
+
+## 认证与账户（Authentication and account）
+
+网页登录、设备令牌、MFA、扩展授权和账户生命周期。
+
+- `GET /api/auth/linux-do`：开始 Linux DO 登录。权限：公开，无需登录。
+- `GET /api/auth/linux-do/callback`：完成 Linux DO 回调。权限：公开，无需登录。
+- `POST /api/login`：密码登录。权限：公开，无需登录。
+- `POST /api/login/mfa`：完成网页登录 MFA。权限：公开，无需登录。
+- `POST /api/auth/token`：签发设备令牌。权限：公开，无需登录。
+- `POST /api/auth/token/refresh`：轮换设备令牌。权限：公开，无需登录。
+- `POST /api/auth/token/revoke`：撤销 Refresh Token。权限：公开，无需登录。
+- `POST /api/auth/extension/authorize`：创建扩展授权码。权限：仅浏览器 Session Cookie。
+- `POST /api/auth/extension/exchange`：交换扩展授权码。权限：公开，无需登录。
+- `GET /api/session`：查询当前会话。权限：可选登录，登录后可能返回更多信息。
+- `POST /api/client-errors`：记录客户端异常。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/logout`：退出当前会话。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/auth/devices`：列出设备会话。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/auth/devices/{id}`：撤销指定设备。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/account`：更新账户资料或密码。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/account`：注销当前账户。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/account/mfa`：读取 MFA 状态。权限：管理员或主管理员。
+- `POST /api/account/mfa/setup`：开始 MFA 配置。权限：管理员或主管理员。
+- `POST /api/account/mfa/confirm`：确认启用 MFA。权限：管理员或主管理员。
+- `DELETE /api/account/mfa`：关闭 MFA。权限：管理员或主管理员。
+- `GET /api/desktop/accounts`：桌面导入目录。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/desktop/credentials`：导入所选邮箱凭据。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## 域名与邮箱地址（Domains and mailboxes）
+
+读取域名并创建、启停、切换或删除邮箱地址。
+
+- `GET /api/domains`：读取可用收件域名。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/mailboxes`：列出当前用户邮箱。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/mailboxes`：创建邮箱地址。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/mailboxes/{address}`：启停邮箱或设为主邮箱。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/mailboxes/{address}`：删除非主邮箱。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/address-tags`：列出地址标签。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/address-tags/{address}`：设置地址的标签。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/address-tags/batch`：批量添加或移除标签。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/address-tags/tags/{tag}`：重命名或合并标签。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/address-tags/tags/{tag}`：删除标签。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## 邮件（Messages）
+
+列表、详情、状态、附件、原文、发信、回复和翻译。
+
+- `GET /api/mail-notifications`：读取统一新邮件通知摘要。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/messages`：查询邮件列表。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/messages`：主动发送邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/messages/bulk`：批量更新邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/messages/{id}`：读取邮件详情。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/messages/{id}`：更新邮件状态。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/messages/{id}`：永久删除垃圾箱邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/messages/{messageId}/attachments/{attachmentId}`：下载或预览附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/messages/{id}/raw`：下载原始 EML。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/messages/{id}/reply`：回复邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/messages/{id}/translation`：翻译邮件正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## 草稿与附件（Drafts and attachments）
+
+服务端草稿的创建、保存、附件和幂等发送。
+
+- `GET /api/drafts`：列出草稿。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/drafts`：创建草稿。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/drafts/{id}`：读取草稿详情。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/drafts/{id}`：保存草稿。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/drafts/{id}`：丢弃草稿。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/drafts/{id}/attachments`：上传草稿附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/drafts/{id}/attachments/{attachmentId}`：删除草稿附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/drafts/{id}/send`：发送草稿。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## iCloud 隐藏邮箱（iCloud Hide My Email）
+
+iCloud 账号、凭据、隐藏地址和按需收件箱。
+
+- `GET /api/icloud/accounts`：列出 iCloud 账户。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/icloud/accounts`：连接 iCloud 账户。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/icloud/accounts/{id}`：修改 iCloud 账户备注。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/icloud/accounts/{id}`：删除 iCloud 账户。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/icloud/accounts/{id}/cookies`：更新 iCloud Cookie。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/icloud/accounts/{id}/app-password`：设置 iCloud 应用专用密码。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/icloud/aliases`：同步隐藏邮箱地址。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/icloud/aliases/preview`：预览隐藏邮箱地址。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/icloud/aliases`：创建隐藏邮箱地址。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/icloud/aliases/{anonymousId}`：停用或恢复隐藏地址。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/icloud/aliases/{anonymousId}`：永久删除隐藏地址。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/icloud/inbox`：读取 iCloud 最近来信。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/icloud/inbox/{uid}`：读取 iCloud 邮件正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## Gmail 聚合收件箱（Gmail unified inbox）
+
+多账号凭据、受控 IMAP 同步、聚合索引、正文与附件。
+
+- `GET /api/gmail/accounts`：列出 Gmail 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/gmail/accounts`：连接 Gmail 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/gmail/accounts/{id}`：重命名 Gmail 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/gmail/accounts/{id}/app-password`：更新 Gmail 应用密码。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/gmail/accounts/{id}`：断开 Gmail 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/gmail/accounts/{id}/verify`：验证 Gmail 连接。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/gmail/accounts/{id}/sync`：请求 Gmail 同步。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/gmail/messages`：列出 Gmail 聚合邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/gmail/accounts/{accountId}/messages/{messageId}`：读取 Gmail 正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/gmail/accounts/{accountId}/messages/{messageId}/attachments/{partId}`：下载 Gmail 附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## Microsoft 邮箱（Microsoft Mail）
+
+OAuth2 认证、受控 IMAP 同步、正文、附件与精确已读写入。
+
+- `GET /api/microsoft/accounts`：列出 Microsoft 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/microsoft/accounts/import`：导入 Microsoft 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/microsoft/accounts/{id}`：重命名 Microsoft 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/microsoft/accounts/{id}/credential`：替换 Microsoft 凭据。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/microsoft/accounts/{id}`：断开 Microsoft 账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/microsoft/accounts/{id}/verify`：验证 Microsoft 连接。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/microsoft/accounts/{id}/sync`：请求 Microsoft 同步。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/microsoft/accounts/{id}/folders`：列出 Microsoft 文件夹。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/microsoft/messages`：列出 Microsoft 邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/microsoft/accounts/{accountId}/messages/{messageId}`：读取 Microsoft 正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/microsoft/accounts/{accountId}/messages/{messageId}/attachments/{partId}`：下载 Microsoft 附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## QQ 邮箱（QQ Mail）
+
+授权码认证、有限 INBOX 索引、按需正文、精确已读与受控 SMTP 发信。
+
+- `GET /api/qq-mail/accounts`：列出 QQ 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/qq-mail/accounts`：连接 QQ 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/qq-mail/accounts/{id}`：重命名 QQ 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/qq-mail/accounts/{id}/authorization-code`：更新 QQ 邮箱授权码。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/qq-mail/accounts/{id}`：断开 QQ 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/qq-mail/accounts/{id}/verify`：验证 QQ 邮箱连接。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/qq-mail/accounts/{id}/sync`：请求 QQ 邮箱同步。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/qq-mail/accounts/{id}/identities`：添加 QQ 邮箱发信身份。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/qq-mail/accounts/{id}/identities/{identityId}`：删除 QQ 邮箱发信身份。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/qq-mail/messages`：列出 QQ 邮箱聚合邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/qq-mail/accounts/{id}/messages`：发送或回复 QQ 邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/qq-mail/accounts/{accountId}/messages/{messageId}`：读取 QQ 邮箱正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/qq-mail/accounts/{accountId}/messages/{messageId}/attachments/{partId}`：下载 QQ 邮箱附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## NAVER 邮箱（NAVER Mail）
+
+应用专用密码认证、有限 INBOX 索引、按需正文、附件与精确已读。
+
+- `GET /api/naver-mail/accounts`：列出 NAVER 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/naver-mail/accounts`：连接 NAVER 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/naver-mail/accounts/{id}`：重命名 NAVER 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/naver-mail/accounts/{id}/app-password`：更新 NAVER 应用专用密码。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/naver-mail/accounts/{id}`：断开 NAVER 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/naver-mail/accounts/{id}/verify`：验证 NAVER 邮箱连接。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/naver-mail/accounts/{id}/sync`：请求 NAVER 邮箱同步。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/naver-mail/messages`：列出 NAVER 聚合邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/naver-mail/accounts/{accountId}/messages/{messageId}`：读取 NAVER 邮箱正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/naver-mail/accounts/{accountId}/messages/{messageId}/attachments/{partId}`：下载 NAVER 邮箱附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## Yandex 邮箱（Yandex Mail）
+
+Mail 应用密码认证、有限 INBOX 索引、按需正文、附件与精确已读。
+
+- `GET /api/yandex-mail/accounts`：列出 Yandex 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/yandex-mail/accounts`：连接 Yandex 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PATCH /api/yandex-mail/accounts/{id}`：重命名 Yandex 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/yandex-mail/accounts/{id}/app-password`：更新 Yandex 应用专用密码。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/yandex-mail/accounts/{id}`：断开 Yandex 邮箱账号。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/yandex-mail/accounts/{id}/verify`：验证 Yandex 邮箱连接。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/yandex-mail/accounts/{id}/sync`：请求 Yandex 邮箱同步。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/yandex-mail/messages`：列出 Yandex 聚合邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/yandex-mail/accounts/{accountId}/messages/{messageId}`：读取 Yandex 邮箱正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/yandex-mail/accounts/{accountId}/messages/{messageId}/attachments/{partId}`：下载 Yandex 邮箱附件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## Linux DO 邮箱（Linux DO Mail）
+
+加密连接 Linux DO Mail，按需读取 INBOX 并通过官方 SMTP 发件。
+
+- `GET /api/linux-do-mail/account`：读取 Linux DO Mail 连接。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/linux-do-mail/account`：连接 Linux DO Mail。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `DELETE /api/linux-do-mail/account`：断开 Linux DO Mail。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/linux-do-mail/account/verify`：验证 Linux DO Mail 凭据。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `PUT /api/linux-do-mail/account/credential`：更新 Linux DO Mail 凭据。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `POST /api/linux-do-mail/messages`：发送 Linux DO Mail 邮件。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/linux-do-mail/inbox`：读取 Linux DO Mail 最近来信。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/linux-do-mail/inbox/{uid}`：读取 Linux DO Mail 正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/linux-do-mail/sent`：读取 Linux DO Mail 发件记录。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+- `GET /api/linux-do-mail/sent/{id}`：读取 Linux DO Mail 发件正文。权限：登录用户（Session Cookie 或 Bearer Access Token）。
+
+## 管理员：运营与邮件（Admin: operations and mail）
+
+统计、审计、失败邮件、全站邮件和安全清理。
+
+- `GET /api/admin/audit-logs`：查询操作日志。权限：管理员或主管理员。
+- `GET /api/admin/statistics`：读取全站统计。权限：管理员或主管理员。
+- `GET /api/admin/deployment-check`：执行部署自检。权限：管理员或主管理员。
+- `GET /api/admin/failed-messages`：列出解析失败邮件。权限：管理员或主管理员。
+- `POST /api/admin/failed-messages/{id}/retry`：重试失败邮件。权限：管理员或主管理员。
+- `GET /api/admin/mail-cleanup/preview`：预估邮件清理。权限：管理员或主管理员。
+- `POST /api/admin/mail-cleanup`：执行邮件清理。权限：管理员或主管理员。
+- `GET /api/admin/messages`：查询全站邮件。权限：仅主管理员。
+- `PATCH /api/admin/messages/bulk`：批量管理全站邮件。权限：仅主管理员。
+- `GET /api/admin/messages/{messageId}/attachments/{attachmentId}`：读取任意用户附件。权限：仅主管理员。
+- `GET /api/admin/messages/{id}/raw`：下载任意用户原始邮件。权限：仅主管理员。
+- `GET /api/admin/messages/{id}`：读取任意用户邮件详情。权限：仅主管理员。
+
+## 管理员：用户与访问（Admin: users and access）
+
+邀请、用户、用户限速和收件域名管理。
+
+- `GET /api/admin/invites`：查询邀请记录。权限：管理员或主管理员。
+- `POST /api/admin/invites`：创建账户邀请。权限：管理员或主管理员。
+- `PATCH /api/admin/invites/{id}/revoke`：撤销邀请。权限：管理员或主管理员。
+- `GET /api/admin/users`：查询用户目录。权限：管理员或主管理员。
+- `POST /api/admin/users`：创建托管用户。权限：管理员或主管理员。
+- `PATCH /api/admin/users/{id}`：更新用户策略。权限：管理员或主管理员。
+- `PATCH /api/admin/users/{id}/outbound-rate-limit`：覆盖用户发信限速。权限：管理员或主管理员。
+- `POST /api/admin/users/{id}/outbound-rate-limit/reset`：清零用户发信计数。权限：管理员或主管理员。
+- `POST /api/admin/domains`：添加收件域名。权限：管理员或主管理员。
+- `PATCH /api/admin/domains/{name}`：启停收件域名。权限：管理员或主管理员。
+- `DELETE /api/admin/domains/{name}`：删除空域名。权限：管理员或主管理员。
+
+## 管理员：设置、备份与版本（Admin: settings, backups, and version）
+
+全局策略、存储、备份浏览和系统更新。
+
+- `GET /api/admin/mail-credentials/migration`：读取邮箱密钥迁移进度。权限：仅浏览器 Session Cookie。
+- `POST /api/admin/mail-credentials/migration`：迁移一批邮箱凭据。权限：仅浏览器 Session Cookie。
+- `PATCH /api/admin/settings/registration`：设置外部注册。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/registration-domains`：设置注册邮箱后缀。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/mail-refresh`：设置自动刷新间隔。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/mail-workspaces`：设置邮箱功能入口。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/remote-images`：设置远程图片策略。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/unassigned-mail`：设置无人收件。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/official-extension`：启用官方浏览器扩展。权限：仅主管理员。
+- `PATCH /api/admin/settings/random-mailbox-prefix`：设置随机邮箱前缀。权限：管理员或主管理员。
+- `GET /api/admin/settings/outbound-rate-limit`：读取全局发信限速。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/outbound-rate-limit`：更新全局发信限速。权限：管理员或主管理员。
+- `GET /api/admin/settings/storage`：读取存储与保留策略。权限：管理员或主管理员。
+- `PATCH /api/admin/settings/storage`：更新存储与保留策略。权限：管理员或主管理员。
+- `POST /api/admin/backups`：启动手动备份。权限：管理员或主管理员。
+- `GET /api/admin/backups/objects`：浏览备份对象。权限：仅主管理员。
+- `GET /api/admin/backups/download`：下载备份对象。权限：仅主管理员。
+- `POST /api/admin/backups/drill`：执行备份结构演练。权限：仅主管理员。
+- `GET /api/admin/version`：检查系统版本。权限：管理员或主管理员。
+
+## Optional
+
+- [完整接口说明](/llms-full.txt)：每个接口的权限、参数、响应、注意事项和 curl 示例合在一个文件里

@@ -47,6 +47,7 @@ import { UserManagement } from '../users/UserManagement'
 import { VersionStatusCard } from '../settings/VersionStatusCard'
 
 const ApiGuide = lazy(async () => ({ default: (await import('../../api-guide/components/ApiGuide')).ApiGuide }))
+const AddressTagsPage = lazy(async () => ({ default: (await import('../../address-tags/components/AddressTagsPage')).AddressTagsPage }))
 
 const refreshOptions: Array<{ value: MailRefreshInterval; label: string }> = [
   { value: 5, label: '5 秒' },
@@ -157,6 +158,7 @@ export function AdminWorkspace({
     return <AccountSettings user={user} onUserChange={onUserChange} onLogout={onLogout} onOpenApiGuide={onOpenApiGuide} onOpenICloud={onOpenICloud} iCloudWorkspaceEnabled={config.iCloudWorkspaceEnabled} />
   }
   if (view === 'api') return <ApiGuide />
+  if (view === 'address-tags') return <AddressTagsPage iCloudEnabled={config.iCloudEnabled && config.iCloudWorkspaceEnabled} />
 
   const activeMailboxes = mailboxes.filter((mailbox) => mailbox.isActive)
   if (view === 'statistics') {

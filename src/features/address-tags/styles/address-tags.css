@@ -1,0 +1,429 @@
+.address-tags-workspace {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.address-tags__header .user-header-actions .button {
+  white-space: nowrap;
+}
+
+.address-tags-feedback {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--success) 30%, var(--line));
+  border-radius: var(--radius-md);
+  background: var(--success-soft);
+  color: var(--success);
+  font-size: 13px;
+}
+
+.address-tags-feedback.is-error {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.address-tags-card {
+  display: grid;
+  gap: 14px;
+}
+
+.address-tags-filters {
+  display: grid;
+  gap: 10px;
+}
+
+.address-tags-filters__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.address-tags-search {
+  display: flex;
+  min-width: min(100%, 240px);
+  flex: 1 1 240px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-tertiary);
+}
+
+.address-tags-search:focus-within {
+  border-color: var(--line-strong);
+  color: var(--text-secondary);
+}
+
+.address-tags-search input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.address-tags-chips {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.address-tags-filters__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 2px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.address-tag-filter {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.address-tag-filter > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.address-tag-filter small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.address-tag-filter:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+.address-tag-filter[aria-pressed="true"],
+.address-tag-filter.is-include {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.address-tag-filter[aria-pressed="true"] small,
+.address-tag-filter.is-include small {
+  color: inherit;
+  opacity: 0.75;
+}
+
+.address-tag-filter.is-exclude {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.address-tag-filter.is-exclude > span {
+  text-decoration: line-through;
+}
+
+.address-tags-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.address-tags-hint.is-warning {
+  color: var(--warning);
+}
+
+.address-tags-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.address-tags-bulk strong {
+  margin-right: 4px;
+  font-size: 13px;
+}
+
+.address-tags-bulk input,
+.address-tag-add input,
+.address-tags-manager__rename input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.address-tags-bulk input:focus,
+.address-tag-add input:focus,
+.address-tags-manager__rename input:focus {
+  border-color: var(--line-strong);
+}
+
+.address-tag-add input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.address-tags-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.address-tags-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.address-tags-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.address-tags-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.address-tags-row:last-child {
+  border-bottom: 0;
+}
+
+.address-tags-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.address-tags-row__check {
+  margin-top: 6px;
+}
+
+.address-tags-row__main {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 8px;
+}
+
+.address-tags-row__address {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.address-tags-row__address strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.address-tags-source {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.address-tags-source.is-other,
+.address-tags-source.is-inactive {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text-tertiary);
+}
+
+.address-tags-row__tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.address-tag-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 3px;
+  min-height: 24px;
+  padding: 0 4px 0 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--text);
+  font-size: 12px;
+}
+
+.address-tag-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.address-tag-chip:not(:has(button)) {
+  padding-right: 9px;
+}
+
+.address-tag-chip button {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.address-tag-chip button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--danger);
+}
+
+.address-tag-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.address-tag-add input {
+  width: 120px;
+  height: 26px;
+}
+
+.address-tags-empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 36px 12px;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.address-tags-manager__list {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.address-tags-manager__list li {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.address-tags-manager__list small {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.address-tags-manager__actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.address-tags-manager > header > .icon-button {
+  margin-left: auto;
+}
+
+.address-tags-manager__rename {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.address-tags-manager__rename input {
+  flex: 1 1 160px;
+}
+
+@media (max-width: 760px) {
+  .address-tags__header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .address-tags__header .user-header-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-column: 1 / -1;
+    margin-top: 2px;
+  }
+
+  .address-tags__header.is-stuck .user-header-actions {
+    display: none;
+  }
+
+  .address-tags-row {
+    gap: 10px;
+    padding-inline: 0;
+  }
+
+  .address-tag-add input {
+    width: 104px;
+  }
+
+  .address-tags-bulk input {
+    flex: 1 1 100%;
+  }
+}

@@ -3,7 +3,7 @@ import type { Folder, UserRole } from '../../shared/api'
 import { isAdminRole } from '../../shared/auth/roles'
 import { MAIL_SOURCE_WEB_PATHS } from '../../shared/mail/mailSourceContract'
 
-export type AdminView = 'statistics' | 'mail' | 'users' | 'invites' | 'logs' | 'settings' | 'account' | 'api' | 'icloud' | 'linuxdo-mail' | 'gmail' | 'microsoft' | 'qq-mail' | 'naver-mail' | 'yandex-mail'
+export type AdminView = 'statistics' | 'mail' | 'users' | 'invites' | 'logs' | 'settings' | 'account' | 'api' | 'icloud' | 'linuxdo-mail' | 'gmail' | 'microsoft' | 'qq-mail' | 'naver-mail' | 'yandex-mail' | 'address-tags'
 
 export type WorkspaceFeatures = {
   iCloudWorkspaceEnabled: boolean
@@ -46,6 +46,7 @@ const adminPaths: Record<AdminView, string> = {
   settings: '/admin/settings',
   account: '/settings/account',
   api: '/settings/api',
+  'address-tags': '/settings/address-tags',
   icloud: MAIL_SOURCE_WEB_PATHS.icloud,
   'linuxdo-mail': MAIL_SOURCE_WEB_PATHS.linuxdo,
   gmail: MAIL_SOURCE_WEB_PATHS.gmail,
@@ -67,7 +68,7 @@ function canOpenAdminView(
   if (view === 'qq-mail') return features.qqMailWorkspaceEnabled
   if (view === 'naver-mail') return features.naverMailWorkspaceEnabled
   if (view === 'yandex-mail') return features.yandexMailWorkspaceEnabled
-  if (view === 'account' || view === 'api') return true
+  if (view === 'account' || view === 'api' || view === 'address-tags') return true
   if (view === 'mail') return role === 'super_admin'
   return isAdminRole(role)
 }

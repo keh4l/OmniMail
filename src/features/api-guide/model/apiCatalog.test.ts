@@ -23,6 +23,7 @@ const routeFiles = [
   'email-worker/src/app/routes/mail-feature-routes.ts',
   'email-worker/src/features/outbound/outbound-rate-limit-routes.ts',
   'email-worker/src/features/system/system-version-routes.ts',
+  'email-worker/src/features/address-tags/address-tag-routes.ts',
 ]
 
 const routePattern = /(?:app|iCloudRoutes|gmailRoutes|microsoftRoutes|qqMailRoutes|naverMailRoutes|yandexMailRoutes|linuxDoMailRoutes|mailFeatureRoutes|outboundRateLimitRoutes|systemVersionRoutes)\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/g
@@ -64,7 +65,7 @@ describe('API catalog', () => {
     expect(new Set(source).size).toBe(source.length)
     expect(new Set(documented).size).toBe(documented.length)
     expect(documented).toEqual(source)
-    expect(documented).toHaveLength(173)
+    expect(documented).toHaveLength(178)
   })
 
   it('provides usage details and a callable example for every endpoint', () => {

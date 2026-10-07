@@ -1,6 +1,7 @@
 import { adminAccessEndpoints, adminSettingsEndpoints } from './apiCatalogAdmin'
 import { gmailEndpoints, iCloudEndpoints, linuxDoMailEndpoints, adminOperationEndpoints } from './apiCatalogOperations'
 import { mailboxEndpoints, messageEndpoints, draftEndpoints } from './apiCatalogMail'
+import { addressTagEndpoints } from './apiCatalogAddressTags'
 import { microsoftEndpoints } from './apiCatalogMicrosoft'
 import { qqMailEndpoints } from './apiCatalogQqMail'
 import { naverMailEndpoints } from './apiCatalogNaverMail'
@@ -55,6 +56,7 @@ export const apiEndpoints: ApiEndpoint[] = [
   ...desktopEndpoints,
   ...credentialMigrationEndpoints,
   ...mailboxEndpoints,
+  ...addressTagEndpoints,
   ...messageEndpoints,
   ...draftEndpoints,
   ...iCloudEndpoints,

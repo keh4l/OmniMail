@@ -6,6 +6,7 @@ import { registerAdminRoutes } from './routes/admin-routes'
 import { registerMailRoutes } from './routes/mail-routes'
 import { registerPublicRoutes } from './routes/public-routes'
 import { registerTelegramRoutes } from '../features/telegram/telegram-routes'
+import { registerAddressTagRoutes } from '../features/address-tags/address-tag-routes'
 import { logWorkerError } from '../shared/observability/structured-log'
 import { d1QuotaResponse } from '../platform/d1/quota-guard'
 
@@ -17,6 +18,7 @@ registerTelegramRoutes(app)
 registerAccountRoutes(app)
 registerAdminRoutes(app)
 registerMailRoutes(app)
+registerAddressTagRoutes(app)
 
 app.onError((error, context) => {
   const quota = d1QuotaResponse(context.env.DB)

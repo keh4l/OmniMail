@@ -31,6 +31,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # 同步上游后若表结构或接口变化导致测试失败，就停止部署，线上保持上一版本。
+      - run: npm test
+      - run: npm run test:worker
       # 部署脚本会先按线上 DB 绑定应用未执行的 D1 迁移，再发布 Worker。
       # Worker 已改名为 k-mail；用名称覆盖而不改 wrangler.jsonc，避免与上游冲突。
       - run: npm run deploy

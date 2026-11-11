@@ -2,6 +2,7 @@ import { canonicalMailFlags, changedIndexFields, needsIndexTrim, rememberIndexTr
 import type { Env, MailQueueJob, MicrosoftSyncJob } from '../../app/types'
 import { ImapConnectionError } from '../../platform/imap/imap-errors'
 import { microsoftMailEnabled } from './microsoft-credentials'
+import { MICROSOFT_SYNC_INTERVAL_SECONDS, microsoftFailureState } from './microsoft-failure-state'
 import type { MicrosoftImapClient } from './microsoft-imap'
 import { openMicrosoftClient } from './microsoft-session'
 import {
@@ -18,7 +19,7 @@ import type {
 
 const INITIAL_MESSAGE_LIMIT = 100
 const INDEX_MESSAGE_LIMIT = 500
-const SYNC_INTERVAL_SECONDS = 5 * 60
+const SYNC_INTERVAL_SECONDS = MICROSOFT_SYNC_INTERVAL_SECONDS
 const LEASE_SECONDS = 6 * 60
 const SCHEDULE_BATCH = 50
 
@@ -54,7 +55,7 @@ async function claimLease(
   const result = await env.DB.prepare(
     `UPDATE microsoft_imap_accounts
         SET sync_lease_id = ?, sync_lease_until = ?, status = 'syncing', updated_at = ?
-      WHERE id = ? AND status NOT IN ('credential_error', 'permission_error')
+      WHERE id = ? AND status <> 'credential_error'
         AND (sync_lease_until IS NULL OR sync_lease_until <= ?)`,
   ).bind(leaseId, now + LEASE_SECONDS, now, accountId, now).run()
   return Boolean(result.meta.changes)
@@ -223,28 +224,21 @@ async function recordFailure(
   accountId: string,
   leaseId: string,
   error: unknown,
-  authMode: MicrosoftAccount['authMode'] | undefined,
+  account: MicrosoftAccount | null,
   now: number,
 ): Promise<string> {
-  const code = microsoftSyncErrorCode(error, authMode)
-  const credentialError = [
-    'invalid_grant', 'invalid_client', 'credential_decryption_failed',
-    'credential_key_unavailable', 'basic_auth_rejected',
-  ].includes(code)
-  const permissionError = [
-    'imap_scope_missing', 'imap_access_rejected', 'xoauth2_unavailable',
-    'invalid_scope', 'unauthorized_client', 'consent_required',
-  ].includes(code)
+  const code = microsoftSyncErrorCode(error, account?.authMode)
+  const state = microsoftFailureState(code, account?.lastSyncedAt, now)
   await env.DB.prepare(
     `UPDATE microsoft_imap_accounts
         SET status = ?, last_error_code = ?, last_error_at = ?, next_sync_at = ?,
             sync_lease_id = NULL, sync_lease_until = NULL, updated_at = ?
       WHERE id = ? AND sync_lease_id = ?`,
   ).bind(
-    credentialError ? 'credential_error' : permissionError ? 'permission_error' : 'error',
+    state.status,
     code,
     now,
-    now + ((credentialError || permissionError) ? 24 * 60 * 60 : SYNC_INTERVAL_SECONDS),
+    state.nextSyncAt,
     now,
     accountId,
     leaseId,
@@ -288,7 +282,7 @@ export async function syncMicrosoftAccount(
     ).bind(now, now + SYNC_INTERVAL_SECONDS, now, accountId, leaseId).run()
     return { status: 'synced', retryable: false }
   } catch (error) {
-    const code = await recordFailure(env, accountId, leaseId, error, account?.authMode, now)
+    const code = await recordFailure(env, accountId, leaseId, error, account, now)
     return {
       status: 'skipped',
       retryable: ![
@@ -323,7 +317,7 @@ export async function enqueueDueMicrosoftSyncs(
   if (!microsoftMailEnabled(env)) return 0
   const { results } = await env.DB.prepare(
     `SELECT id FROM microsoft_imap_accounts
-      WHERE status IN ('active', 'error') AND next_sync_at <= ?
+      WHERE status IN ('active', 'error', 'permission_error') AND next_sync_at <= ?
         AND (sync_lease_until IS NULL OR sync_lease_until <= ?)
       ORDER BY next_sync_at, id LIMIT ?`,
   ).bind(now, now, SCHEDULE_BATCH).all<{ id: string }>()

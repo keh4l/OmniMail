@@ -322,7 +322,7 @@ export async function verifyMicrosoftAccount(
     await saveMicrosoftFolders(env, accountId, folders, now)
     await env.DB.prepare(
       `UPDATE microsoft_imap_accounts SET status = 'active', last_error_code = '',
-              last_error_at = NULL, updated_at = ?
+              last_error_at = NULL, next_sync_at = 0, updated_at = ?
         WHERE id = ? AND user_id = ?`,
     ).bind(now, accountId, user.id).run()
     await writeAudit(env, user.id, 'microsoft.account.verify', accountId, ip, {

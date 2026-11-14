@@ -16,6 +16,7 @@ import { consumeNaverMailSyncJob } from '../../features/naver-mail/naver-mail-sy
 import { consumeYandexMailSyncJob } from '../../features/yandex-mail/yandex-mail-sync'
 import { consumeExternalMailSyncJob } from '../../features/external-mail/external-mail-sync'
 import type { Env, MailQueueJob, MessageRow, ParseJob, StoredBody } from '../types'
+import { recordQueueFailure } from '../../features/queue-usage/queue-recovery'
 
 type ParsedAddress = {
   address?: string
@@ -224,12 +225,9 @@ export async function receiveEmail(message: ForwardableEmailMessage, env: Env): 
     await env.MAIL_QUEUE.send({ kind: 'parse', messageId: id })
   } catch (error) {
     if (inserted) {
-      await env.DB.prepare(
-        `UPDATE messages
-            SET status = 'failed', processing_error = ?, last_failed_at = unixepoch(),
-                updated_at = unixepoch()
-          WHERE id = ?`,
-      ).bind(error instanceof Error ? error.message : 'Unable to queue message', id).run()
+      // 原文已保存，只是解析任务没能入队：定时任务会在 24 小时内自动重新入队，不必让发件方重投。
+      await recordQueueFailure(env, id, error)
+      return
     } else {
       if (rawStored) await env.MAIL_BUCKET.delete(rawKey)
       await releaseStorage(env.DB, mailbox.userId, quotaBytes)

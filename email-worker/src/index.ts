@@ -5,6 +5,8 @@ import type { Env, MailQueueJob, NotificationQueueJob } from './app/types'
 import { D1QuotaError, d1QuotaResponse, quotaEnvironment, quotaQueueDelay } from './platform/d1/quota-guard'
 import { ensureSchema } from './platform/d1/schema'
 import { consumeNotificationQueue, enqueuePendingNotifications, purgeOldNotifications } from './features/telegram/telegram-delivery'
+import { queueUsageEnvironment, recordQueueRedeliveries } from './features/queue-usage/queue-usage'
+import { runQueueMaintenance } from './features/queue-usage/queue-recovery'
 
 export { OmniMailBackupWorkflow } from './features/backups/backup'
 export { OmniMailCleanupWorkflow } from './platform/scheduling/cleanup-workflow'
@@ -12,7 +14,7 @@ export { OmniMailCleanupWorkflow } from './platform/scheduling/cleanup-workflow'
 async function fetchRequest(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
   const path = new URL(request.url).pathname
   if (path !== '/api' && !path.startsWith('/api/')) return env.ASSETS.fetch(request)
-  const guarded = quotaEnvironment(env)
+  const guarded = queueUsageEnvironment(quotaEnvironment(env))
   const response = await fetchApi(request, guarded, context)
   const quota = response.status >= 500 ? d1QuotaResponse(guarded.DB) : undefined
   if (!quota) return response
@@ -24,9 +26,10 @@ async function fetchRequest(request: Request, env: Env, context: ExecutionContex
 
 export default {
   fetch: fetchRequest,
-  email: (message, env) => receiveEmail(message, quotaEnvironment(env)),
+  email: (message, env) => receiveEmail(message, queueUsageEnvironment(quotaEnvironment(env))),
   queue: async (batch, env) => {
-    const guarded = quotaEnvironment(env)
+    const guarded = queueUsageEnvironment(quotaEnvironment(env))
+    await recordQueueRedeliveries(guarded.DB, batch)
     try {
       if (batch.queue === 'omnimail-notifications') {
         await ensureSchema(guarded.DB)
@@ -43,9 +46,11 @@ export default {
     }
   },
   scheduled: async (_controller, env) => {
-    const guarded = quotaEnvironment(env)
+    const guarded = queueUsageEnvironment(quotaEnvironment(env))
     try {
-      await cleanup(guarded)
+      await runQueueMaintenance(guarded)
+      // 定时同步等后台任务受每日队列预算限制，留出额度给发信和收信解析。
+      await cleanup(queueUsageEnvironment(guarded, 'background'))
       await enqueuePendingNotifications(guarded)
       await purgeOldNotifications(guarded.DB)
     }

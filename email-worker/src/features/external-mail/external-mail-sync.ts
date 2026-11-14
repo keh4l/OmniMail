@@ -10,6 +10,7 @@ import { iCloudCredentialsReady } from '../icloud/icloud-credentials'
 import { LinuxDoMailAccountStore } from '../linux-do-mail/linux-do-mail-store'
 import { linuxDoMailCredentialsReady } from '../linux-do-mail/linux-do-mail-credentials'
 import type { Env, MailQueueJob, MailSyncLimit } from '../../app/types'
+import { shouldRetrySyncJob } from '../queue-usage/sync-cadence'
 
 const INDEX_MESSAGE_LIMIT = 200
 const SYNC_INTERVAL_SECONDS = 5 * 60
@@ -295,7 +296,7 @@ export async function consumeExternalMailSyncJob(
     Math.floor(Date.now() / 1000),
     message.body.limit ?? DEFAULT_MAIL_SYNC_LIMIT,
   )
-  if (result.retryable && message.attempts < 3) message.retry({
+  if (shouldRetrySyncJob(message.body.reason, message.attempts, result.retryable)) message.retry({
     delaySeconds: 30 * 2 ** Math.max(0, message.attempts - 1),
   })
   else message.ack()

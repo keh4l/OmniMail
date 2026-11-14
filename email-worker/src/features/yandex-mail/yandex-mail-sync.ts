@@ -5,6 +5,7 @@ import type { YandexMailImapClient } from './yandex-mail-imap'
 import { yandexMailAccountForSync, YandexMailStoreError } from './yandex-mail-store'
 import type { YandexMailMessageMetadata } from './yandex-mail-types'
 import type { Env, MailQueueJob, YandexMailSyncJob } from '../../app/types'
+import { shouldRetrySyncJob } from '../queue-usage/sync-cadence'
 
 const INITIAL_MESSAGE_LIMIT = 100
 const INDEX_MESSAGE_LIMIT = 500
@@ -248,7 +249,7 @@ export async function consumeYandexMailSyncJob(
 ): Promise<void> {
   if (message.body.kind !== 'yandex-mail-sync') return
   const result = await syncYandexMailAccount(env, message.body.accountId)
-  if (result.retryable && message.attempts < 3) {
+  if (shouldRetrySyncJob(message.body.reason, message.attempts, result.retryable)) {
     message.retry({ delaySeconds: 30 * 2 ** Math.max(0, message.attempts - 1) })
   } else {
     message.ack()

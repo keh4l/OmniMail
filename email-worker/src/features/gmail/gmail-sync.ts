@@ -10,6 +10,7 @@ import type { GmailImapClient } from './gmail-imap'
 import { gmailAccountForSync, GmailStoreError } from './gmail-store'
 import type { GmailMessageMetadata } from './gmail-types'
 import type { Env, GmailSyncJob, MailQueueJob, MailSyncLimit } from '../../app/types'
+import { relaxQuietSyncInterval, shouldRetrySyncJob } from '../queue-usage/sync-cadence'
 
 const INDEX_MESSAGE_LIMIT = 500
 const SYNC_INTERVAL_SECONDS = 5 * 60
@@ -236,6 +237,7 @@ export async function syncGmailAccount(
     ))
     await env.DB.batch(statements)
     if (trimNeeded) rememberIndexTrim(env.DB, trimScope, INDEX_MESSAGE_LIMIT)
+    await relaxQuietSyncInterval(env.DB, { provider: 'gmail', accountId }, now, now + SYNC_INTERVAL_SECONDS)
     return { status: 'synced', retryable: false }
   } catch (error) {
     const code = await recordFailure(env, accountId, leaseId, error, now)
@@ -268,7 +270,7 @@ export async function consumeGmailSyncJob(
     Math.floor(Date.now() / 1000),
     limit,
   )
-  if (result.retryable && message.attempts < 3) {
+  if (shouldRetrySyncJob(message.body.reason, message.attempts, result.retryable)) {
     message.retry({ delaySeconds: 30 * 2 ** Math.max(0, message.attempts - 1) })
   } else {
     message.ack()

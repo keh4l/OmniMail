@@ -16,6 +16,7 @@ import type {
   MicrosoftFolder,
   MicrosoftMessageMetadata,
 } from './microsoft-types'
+import { relaxQuietSyncInterval, shouldRetrySyncJob } from '../queue-usage/sync-cadence'
 
 const INITIAL_MESSAGE_LIMIT = 100
 const INDEX_MESSAGE_LIMIT = 500
@@ -280,6 +281,7 @@ export async function syncMicrosoftAccount(
               sync_lease_id = NULL, sync_lease_until = NULL, updated_at = ?
         WHERE id = ? AND sync_lease_id = ?`,
     ).bind(now, now + SYNC_INTERVAL_SECONDS, now, accountId, leaseId).run()
+    await relaxQuietSyncInterval(env.DB, { provider: 'microsoft', accountId, folderPath: inbox.path }, now, now + SYNC_INTERVAL_SECONDS)
     return { status: 'synced', retryable: false }
   } catch (error) {
     const code = await recordFailure(env, accountId, leaseId, error, account, now)
@@ -303,7 +305,7 @@ export async function consumeMicrosoftSyncJob(
 ): Promise<void> {
   if (message.body.kind !== 'microsoft-sync') return
   const result = await syncMicrosoftAccount(env, message.body.accountId)
-  if (result.retryable && message.attempts < 3) {
+  if (shouldRetrySyncJob(message.body.reason, message.attempts, result.retryable)) {
     message.retry({ delaySeconds: 30 * 2 ** Math.max(0, message.attempts - 1) })
   } else {
     message.ack()

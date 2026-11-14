@@ -17,6 +17,7 @@ import {
 import { reconcileResendEvents } from './resend-webhook'
 import { resendConfigForAddress } from './resend-config'
 import type { Env, OutboundJob, SessionUser, StoredBody } from '../../app/types'
+import { OUTBOUND_QUEUE_FAILURE_MESSAGE, recordQueueFailure } from '../queue-usage/queue-recovery'
 
 export type OutboundMessage = {
   mailboxAddress: string
@@ -146,12 +147,8 @@ export async function requeueFailedOutbound(
     })
     return json({ message: { id: messageId, status: 'processing' } }, 202)
   } catch (error) {
-    const detail = error instanceof Error ? error.message : 'Unable to queue outbound message'
-    await env.DB.prepare(
-      `UPDATE messages SET status = 'failed', processing_error = ?,
-          last_failed_at = unixepoch(), updated_at = unixepoch() WHERE id = ?`,
-    ).bind(detail.slice(0, 500), messageId).run()
-    return json({ error: '发送任务暂时无法入队，请稍后重试。' }, 503)
+    await recordQueueFailure(env, messageId, error)
+    return json({ error: OUTBOUND_QUEUE_FAILURE_MESSAGE }, 503)
   }
 }
 
@@ -336,14 +333,8 @@ export async function sendOutboundMessage(
     await queueOutbound(env, outboundId, user.id, input, ip)
     return json({ message: { id: outboundId, status: 'processing' } }, 202)
   } catch (error) {
-    const detail = error instanceof Error ? error.message : 'Unable to queue outbound message'
-    await env.DB.prepare(
-      `UPDATE messages
-          SET status = 'failed', processing_error = ?, last_failed_at = unixepoch(),
-              updated_at = unixepoch()
-        WHERE id = ?`,
-    ).bind(detail.slice(0, 500), outboundId).run()
-    return json({ error: '发送任务暂时无法入队，请稍后重试。' }, 503)
+    await recordQueueFailure(env, outboundId, error)
+    return json({ error: OUTBOUND_QUEUE_FAILURE_MESSAGE }, 503)
   }
 }
 

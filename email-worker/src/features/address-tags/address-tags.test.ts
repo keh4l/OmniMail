@@ -1,5 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs'
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import {
   batchAddressTags,
@@ -16,56 +15,7 @@ import {
   normalizeTagList,
 } from './address-tag-store'
 import type { Env, SessionUser } from '../../app/types'
-
-type Row = Record<string, string | number | null>
-
-// 在 node:sqlite 上执行全部真实迁移并模拟 D1 接口，让查询直接覆盖当前上游表结构。
-function migratedDatabase(options: { skip?: string } = {}): DatabaseSync {
-  const db = new DatabaseSync(':memory:')
-  const names = readdirSync('migrations').filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()
-  for (const name of names) if (name !== options.skip) db.exec(readFileSync(`migrations/${name}`, 'utf8'))
-  return db
-}
-
-function d1(db: DatabaseSync) {
-  const statement = (sql: string, params: Array<string | number | null> = []) => ({
-    sql,
-    params,
-    bind: (...values: Array<string | number | null>) => statement(sql, values),
-    all: async () => ({ results: db.prepare(sql).all(...params) }),
-    first: async () => db.prepare(sql).get(...params) ?? null,
-    run: async () => ({ meta: { changes: Number(db.prepare(sql).run(...params).changes) } }),
-  })
-  return {
-    prepare: (sql: string) => statement(sql),
-    async batch(statements: Array<ReturnType<typeof statement>>) {
-      db.exec('BEGIN')
-      try {
-        const results = statements.map(({ sql, params }) => ({ results: db.prepare(sql).all(...params) }))
-        db.exec('COMMIT')
-        return results
-      } catch (error) {
-        db.exec('ROLLBACK')
-        throw error
-      }
-    },
-  }
-}
-
-// 按表结构自动补齐必填列，测试只需声明与地址来源相关的字段。
-function insert(db: DatabaseSync, table: string, values: Row): void {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
-    name: string; type: string; notnull: number; dflt_value: string | null; pk: number
-  }>
-  const row: Row = { ...values }
-  for (const column of columns) {
-    if (column.name in row || !column.notnull || column.dflt_value !== null) continue
-    row[column.name] = /INT/i.test(column.type) ? 0 : `${column.name}-${crypto.randomUUID()}`
-  }
-  const names = Object.keys(row)
-  db.prepare(`INSERT INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`)
-    .run(...names.map((name) => row[name]))
-}
+import { d1, insert, migratedDatabase } from '../../../test-support/sqlite-d1'
 
 function own(db: DatabaseSync, userId: string, ...addresses: string[]): void {
   for (const address of addresses) insert(db, 'mailboxes', { address, user_id: userId })

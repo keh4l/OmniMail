@@ -2,6 +2,7 @@ import { writeAudit } from '../../shared/audit/audit'
 import { outboundProviderConfigError, outboundProviderForAddress } from '../outbound/outbound-provider-config'
 import { DELIVERY_UNCERTAIN_PREFIX } from '../outbound/outbound-message'
 import type { Env, SessionUser } from '../../app/types'
+import { recordQueueFailure, RETRY_QUEUE_FAILURE_MESSAGE } from '../queue-usage/queue-recovery'
 
 interface FailedMessageRow {
   id: string
@@ -134,12 +135,8 @@ export async function retryFailedMessage(
       auditDetail: { recipients: JSON.parse(message.recipients_json) },
     } : { kind: 'parse', messageId: message.id })
   } catch (error) {
-    const detail = error instanceof Error ? error.message : 'Unable to queue retry'
-    await env.DB.prepare(
-      `UPDATE messages SET status = 'failed', processing_error = ?,
-          last_failed_at = unixepoch(), updated_at = unixepoch() WHERE id = ?`,
-    ).bind(detail.slice(0, 500), message.id).run()
-    return Response.json({ error: '重新提交失败，请稍后再试。' }, { status: 503 })
+    await recordQueueFailure(env, message.id, error)
+    return Response.json({ error: RETRY_QUEUE_FAILURE_MESSAGE }, { status: 503 })
   }
   await writeAudit(env, user.id, 'message.retry', message.id, ip, {})
   return Response.json({ ok: true })

@@ -16,6 +16,7 @@ import type { QqMailImapClient } from './qq-mail-imap'
 import { qqMailAccountForSync, QqMailStoreError } from './qq-mail-store'
 import type { QqMailAccount, QqMailMessageMetadata } from './qq-mail-types'
 import type { Env, MailQueueJob, MailSyncLimit, QqMailSyncJob } from '../../app/types'
+import { shouldRetrySyncJob } from '../queue-usage/sync-cadence'
 
 const INDEX_MESSAGE_LIMIT = 500
 const SYNC_INTERVAL_SECONDS = 5 * 60
@@ -401,7 +402,7 @@ export async function consumeQqMailSyncJob(
     limit,
     { reason: message.body.reason, attempt: message.attempts },
   )
-  if (result.retryable && message.attempts < 3) {
+  if (shouldRetrySyncJob(message.body.reason, message.attempts, result.retryable)) {
     message.retry({ delaySeconds: 30 * 2 ** Math.max(0, message.attempts - 1) })
   } else {
     message.ack()

@@ -97,4 +97,10 @@ export const enForkFeatures: Record<string, string> = {
   '标签不存在。': 'Tag not found.',
   '地址标签数据库迁移未完成，请运行 npm run deploy。': 'The address tag database migration is incomplete. Run npm run deploy.',
   '请求体必须是 JSON 对象。': 'The request body must be a JSON object.',
+
+  // 队列额度用完时发信 / 重试的提示（与 email-worker/src/features/queue-usage/queue-recovery.ts 保持一致）
+  '发送任务暂时无法入队，可能是今日队列额度已用完（每天 UTC 0 点重置）。邮件已保存，24 小时内会自动重发，不用重复发送；管理员也可以在「失败邮件恢复中心」手动重发。':
+    'The send job could not be queued, probably because today\'s queue quota is used up (it resets daily at 00:00 UTC). Your message is saved and will be resent automatically within 24 hours, so you do not need to send it again. Administrators can also resend it from the Failed mail recovery center.',
+  '重新提交失败：任务队列暂不可用，可能是今日队列额度已用完（每天 UTC 0 点重置）。24 小时内会自动重试。':
+    'Resubmission failed: the job queue is unavailable, probably because today\'s queue quota is used up (it resets daily at 00:00 UTC). It will be retried automatically within 24 hours.',
 }
